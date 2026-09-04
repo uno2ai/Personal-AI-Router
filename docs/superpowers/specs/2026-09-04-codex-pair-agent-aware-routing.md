@@ -1,6 +1,6 @@
 # Design Specification: Native Local Codex on an Agent-Aware PAIR Fabric
 
-**Status:** Proposed
+**Status:** Superseded by `2026-09-04-codex-supervisor-pair-control-plane.md`
 **Date:** 2026-09-04
 **Repository:** NVIDIA Personal-AI-Router v0.1.1 (`13b68115fa2c9c1d94f1ead1358f8d5a527cfecf`)
 
