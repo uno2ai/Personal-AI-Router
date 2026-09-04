@@ -160,6 +160,7 @@ type Broker struct {
 	settingsPath      string
 	clusterMgrPath    string
 	schedulerPath     string
+	codexWorkerPort   int
 	clusterDir        string
 	// Managed-port state is prepared before proxy startup and read by the proxy
 	// supervisor/reader goroutines. Ollama commits its pending backend move after
@@ -326,17 +327,18 @@ type Broker struct {
 // required; every other field is optional (an empty string means the
 // broker won't spawn that worker because its binary couldn't be resolved).
 type workerPaths struct {
-	scanner       string
-	nodeInfo      string
-	proxy         string
-	lmstudioProxy string
-	workloadMgr   string
-	errors        string
-	engineMgr     string
-	manualNodes   string
-	settings      string
-	clusterMgr    string
-	scheduler     string
+	scanner         string
+	nodeInfo        string
+	proxy           string
+	lmstudioProxy   string
+	workloadMgr     string
+	errors          string
+	engineMgr       string
+	manualNodes     string
+	settings        string
+	clusterMgr      string
+	scheduler       string
+	codexWorkerPort int
 	// clusterDir is the cluster-manager config dir (node.crt/node.key +
 	// trusted/). Threaded to every worker that does cluster-scoped inter-node
 	// mTLS so they serve/dial pinned peers once this node joins a cluster.
@@ -376,6 +378,7 @@ func NewBroker(codec *Codec, paths workerPaths) *Broker {
 		settingsPath:       paths.settings,
 		clusterMgrPath:     paths.clusterMgr,
 		schedulerPath:      paths.scheduler,
+		codexWorkerPort:    paths.codexWorkerPort,
 		clusterDir:         paths.clusterDir,
 		store:              newDiscoveryStore(),
 		telemetry:          newTelemetryCache(),
@@ -1658,6 +1661,9 @@ func (b *Broker) Serve(ctx context.Context) error {
 		return fmt.Errorf("start scanner: %w", err)
 	}
 	defer b.scannerSup.Stop()
+	if b.codexWorkerPort > 0 {
+		b.registerService(noderec.RegisterParams{Service: noderec.ServiceCodexWorker, Port: b.codexWorkerPort})
+	}
 
 	// nvpair-errors is the service-error datastore and the backbone of the
 	// error-surfacing pipeline: producers' errors:report / errors:clear

@@ -212,6 +212,10 @@ func brokerWithEngineInventory(t *testing.T, ports map[string]int) *Broker {
 func isolateOllamaHostTestConfig(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()
+	// os.UserConfigDir on macOS/Linux follows HOME, not XDG_CONFIG_HOME in
+	// every supported Go/runtime combination. Keep the persistence assertion
+	// isolated from a developer's real NVPAIR state as well as from Windows.
+	t.Setenv("HOME", dir)
 	t.Setenv("LOCALAPPDATA", dir)
 	t.Setenv("XDG_CONFIG_HOME", dir)
 }

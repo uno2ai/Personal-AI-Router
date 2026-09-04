@@ -96,3 +96,12 @@ func TestDecodeTaskRequestRejectsTrailingJSON(t *testing.T) {
 		t.Fatal("accepted trailing JSON value")
 	}
 }
+
+func TestWorkspaceRejectsPortableAbsoluteAndEmptyComponents(t *testing.T) {
+	for _, path := range []string{"/tmp/workspace", `\\server\share`, `C:\\workspace`, "local/", "local\\", "local//nested", "local/\\nested"} {
+		workspace := WorkspaceSpec{ID: "local", Path: path, Mode: "read"}
+		if err := workspace.Validate(); err == nil {
+			t.Errorf("workspace path %q was accepted", path)
+		}
+	}
+}

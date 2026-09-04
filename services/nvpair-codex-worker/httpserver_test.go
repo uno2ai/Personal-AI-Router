@@ -9,6 +9,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
+
+	"nvpair-shared/codexprotocol"
 )
 
 func newTestHTTPServer(t *testing.T) *httptest.Server {
@@ -27,6 +30,68 @@ func newTestHTTPServer(t *testing.T) *httptest.Server {
 	server := httptest.NewServer(NewServer(store, NewAppServerFactory(mustExecutable(t)), policy))
 	t.Cleanup(server.Close)
 	return server
+}
+
+func TestFollowUpUsesCurrentLeaseAndResumesThePersistedThread(t *testing.T) {
+	server := newTestHTTPServer(t)
+	request := validTaskRequest("follow-create", "follow-task", "follow-attempt", 1)
+	response := postJSON(t, server.URL+"/v1/tasks", mustJSONBytes(t, request))
+	if response.StatusCode != http.StatusAccepted {
+		t.Fatalf("create status %d", response.StatusCode)
+	}
+	var accepted TaskResponse
+	decodeJSON(t, response, &accepted)
+	var current codexprotocol.TaskRecord
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		statusResponse, err := http.Get(server.URL + "/v1/tasks/follow-task")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.NewDecoder(statusResponse.Body).Decode(&current); err != nil {
+			statusResponse.Body.Close()
+			t.Fatal(err)
+		}
+		statusResponse.Body.Close()
+		if current.State.Terminal() && current.ThreadID != "" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if current.State != codexprotocol.StateCompleted || current.ThreadID == "" {
+		t.Fatalf("initial task did not complete with a thread: %+v", current)
+	}
+	follow := followUpRequest{Mutation: current.Mutation, Context: request.Context}
+	follow.RequestID = "follow-up-request"
+	follow.Context.Objective = "verify the follow-up turn"
+	response = postJSON(t, server.URL+"/v1/tasks/follow-task/turns", mustJSONBytes(t, follow))
+	if response.StatusCode != http.StatusAccepted {
+		t.Fatalf("follow-up status %d", response.StatusCode)
+	}
+	var reopened TaskResponse
+	decodeJSON(t, response, &reopened)
+	if reopened.Record.LeaseEpoch != current.LeaseEpoch+1 || reopened.Record.State != codexprotocol.StateAccepted {
+		t.Fatalf("follow-up did not advance the fenced lease: %+v", reopened.Record)
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		statusResponse, err := http.Get(server.URL + "/v1/tasks/follow-task")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.NewDecoder(statusResponse.Body).Decode(&current); err != nil {
+			statusResponse.Body.Close()
+			t.Fatal(err)
+		}
+		statusResponse.Body.Close()
+		if current.State.Terminal() {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if current.State != codexprotocol.StateCompleted || current.LeaseEpoch != reopened.Record.LeaseEpoch {
+		t.Fatalf("follow-up did not complete under the new lease: %+v", current)
+	}
 }
 
 func mustJSONBytes(t *testing.T, value any) []byte {

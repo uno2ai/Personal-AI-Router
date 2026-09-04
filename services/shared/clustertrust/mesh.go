@@ -5,8 +5,10 @@ package clustertrust
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
@@ -236,6 +238,18 @@ func (m *Mesh) HasPin(uuid string) bool {
 	return ok
 }
 
+// PinnedCertificateSHA256 returns the digest of the currently trusted leaf for
+// uuid. It lets a long-running operation detect a same-principal certificate
+// rotation without exposing certificate bytes to a caller or to the protocol.
+func (m *Mesh) PinnedCertificateSHA256(uuid string) (string, bool) {
+	der, ok := m.trustedDER(uuid)
+	if !ok {
+		return "", false
+	}
+	digest := sha256.Sum256(der)
+	return hex.EncodeToString(digest[:]), true
+}
+
 // matchDER is the server-side gate: accept der for uuid when it byte-for-byte
 // matches the pinned peer cert, or when uuid is this node and der is its own
 // leaf (self-trust).
@@ -254,6 +268,10 @@ func (m *Mesh) ServerTLSConfig() *tls.Config {
 	return &tls.Config{
 		MinVersion: tls.VersionTLS12,
 		GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) {
+			// The watcher is intentionally a two-second poll, but a new
+			// handshake must never rely on the last poll. Refresh here so a
+			// removed/rotated identity is rejected at the TLS boundary too.
+			m.Refresh()
 			id, ok := m.identity()
 			if !ok || !m.Clustered() {
 				return nil, ErrNotClustered

@@ -35,7 +35,7 @@ see the [root README](../README.md#what-is-supported).
 
 ## Architecture
 
-This tree builds fifteen Go binaries. `nvpair-ui-broker` is the parent service and supervises the eleven PAIR workers, all spawned at startup — only the scanner is required, and a missing binary for any other leaves the broker running without that capability. `nvpair-tui` is the thirteenth: a terminal client that launches and supervises its own broker rather than being supervised. `nvpair-codex-worker` and `nvpair-codex-supervisor` are local Codex orchestration services and are not automatically started by Electron in Phase 1. Processes communicate via newline-delimited JSON-RPC 2.0 over stdio or, optionally, a Unix socket / Windows named pipe.
+This tree builds fifteen Go binaries. `nvpair-ui-broker` is the parent service and supervises the eleven PAIR workers, all spawned at startup — only the scanner is required, and a missing binary for any other leaves the broker running without that capability. `nvpair-tui` is the thirteenth: a terminal client that launches and supervises its own broker rather than being supervised. `nvpair-codex-worker` is the dedicated native Codex execution gateway and `nvpair-codex-supervisor` is the local Main Codex MCP bridge; they are configured separately from the Electron broker so each host's workspace, Codex login, and approval UI remain local. Processes communicate via newline-delimited JSON-RPC 2.0 over stdio or, optionally, a Unix socket / Windows named pipe.
 
 | Binary | Role |
 | --- | --- |
@@ -126,6 +126,42 @@ Do **not** build individual components by hand without also copying their binari
 The staged binaries in `build/bin/` are what you run locally. Installable builds
 come from the
 [releases page](https://github.com/NVIDIA/Personal-AI-Router/releases).
+
+### Native Codex execution across computers
+
+Run exactly one Supervisor beside Main Codex. Run one Worker Gateway on each
+computer whose local workspace or tools should be available. The Supervisor
+does not execute code and the Worker does not share the Main conversation or
+credentials. A Worker launches that computer's native `codex app-server`, so
+the Worker must run as the same interactive user (or an explicitly configured
+service account with its own Codex login) that owns the intended workspace.
+
+For local development, use loopback HTTP plus a bearer token. For paired
+machines, use Worker HTTPS on TCP 14324 with the PAIR cluster directory and
+Supervisor certificate allowlist. PAIR publishes the Worker as `cw=14324` in
+the existing `_nvpair-node._tcp` TXT record; the Supervisor uses that service
+entry and its ranked addresses, not a fixed-port scan. See the two component
+README files for exact commands.
+
+On Windows, run the Worker under the same interactive account that is logged in
+to Codex, and keep the Supervisor beside Main Codex only:
+
+```powershell
+$bytes = New-Object byte[] 32
+$rng = [Security.Cryptography.RandomNumberGenerator]::Create(); $rng.GetBytes($bytes); $rng.Dispose()
+$env:WORKER_TOKEN = ([BitConverter]::ToString($bytes)).Replace('-', '').ToLowerInvariant()
+& .\build\bin\nvpair-codex-worker.exe --workspace-root 'C:\Work\project' --listen 127.0.0.1:14324 --auth-token $env:WORKER_TOKEN
+& .\build\bin\nvpair-codex-supervisor.exe --worker-url http://127.0.0.1:14324 --worker-token $env:WORKER_TOKEN
+```
+
+For a Windows Worker serving a paired Main machine, use
+`--listen 0.0.0.0:14324 --cluster-dir <path> --supervisor-allowlist <Main
+principal>` instead of bearer mode. The installer adds the TCP 14324 rule for
+the trusted local subnet; the Worker still requires pinned mTLS and an explicit
+Supervisor ACL. Use Task Scheduler or a Windows service wrapper for the Worker
+at user logon, never `SYSTEM`, so its Codex login, workspace, and tools remain
+the intended user's. The Supervisor must remain a local stdio process launched
+by Main Codex, not a LAN service.
 
 ## Running
 

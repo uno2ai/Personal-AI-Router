@@ -19,12 +19,14 @@ import (
 )
 
 const (
-	ProtocolVersion  = 1
-	ContextVersion   = 1
-	HandoffVersion   = 1
-	MaxContextBytes  = 256 << 10
-	MaxHandoffBytes  = 64 << 10
-	MaxEventMetadata = 8 << 10
+	ProtocolVersion    = 1
+	ContextVersion     = 1
+	HandoffVersion     = 1
+	MaxContextBytes    = 256 << 10
+	MaxHandoffBytes    = 64 << 10
+	MaxArtifactBytes   = 8 << 20
+	MaxEventMetadata   = 8 << 10
+	MaxCapabilityBytes = 16 << 10
 )
 
 type TaskState string
@@ -108,6 +110,46 @@ type Input struct {
 	SHA256     string `json:"sha256"`
 }
 
+// WorkerCapabilities is the authenticated, locally configured scheduling
+// surface published by a Worker. It contains no prompt or workspace contents.
+type WorkerCapabilities struct {
+	ProtocolVersion  int      `json:"protocolVersion"`
+	WorkerVersion    string   `json:"workerVersion"`
+	AppServerVersion string   `json:"appServerVersion"`
+	OS               string   `json:"os"`
+	Architecture     string   `json:"architecture"`
+	WorkspaceAliases []string `json:"workspaceAliases,omitempty"`
+	WorkspaceModes   []string `json:"workspaceModes,omitempty"`
+	ToolLabels       []string `json:"toolLabels,omitempty"`
+	SandboxModes     []string `json:"sandboxModes,omitempty"`
+	ApprovalModes    []string `json:"approvalModes,omitempty"`
+	MaxConcurrency   int      `json:"maxConcurrency"`
+	AvailableSlots   int      `json:"availableSlots"`
+}
+
+func (c WorkerCapabilities) Validate() error {
+	if c.ProtocolVersion != ProtocolVersion {
+		return fmt.Errorf("unsupported worker protocolVersion %d", c.ProtocolVersion)
+	}
+	if strings.TrimSpace(c.WorkerVersion) == "" || strings.TrimSpace(c.AppServerVersion) == "" {
+		return errors.New("worker and app-server versions are required")
+	}
+	if strings.TrimSpace(c.OS) == "" || strings.TrimSpace(c.Architecture) == "" {
+		return errors.New("worker OS and architecture are required")
+	}
+	if c.MaxConcurrency <= 0 || c.AvailableSlots < 0 || c.AvailableSlots > c.MaxConcurrency {
+		return errors.New("worker capacity is invalid")
+	}
+	encoded, err := json.Marshal(c)
+	if err != nil {
+		return err
+	}
+	if len(encoded) > MaxCapabilityBytes {
+		return fmt.Errorf("worker capabilities exceed %d bytes", MaxCapabilityBytes)
+	}
+	return nil
+}
+
 func (p ContextPackage) Validate() error {
 	if p.Version != ContextVersion {
 		return fmt.Errorf("unsupported context version %d", p.Version)
@@ -121,6 +163,11 @@ func (p ContextPackage) Validate() error {
 	if p.Limits.WallSeconds > 24*60*60 {
 		return errors.New("limits.wallSeconds exceeds 24 hours")
 	}
+	for _, input := range p.Inputs {
+		if !safeToken(input.ArtifactID) || !isSHA256(input.SHA256) {
+			return errors.New("context input artifact identity is invalid")
+		}
+	}
 	encoded, err := json.Marshal(p)
 	if err != nil {
 		return fmt.Errorf("encode context: %w", err)
@@ -129,6 +176,32 @@ func (p ContextPackage) Validate() error {
 		return fmt.Errorf("context exceeds 256 KiB: %d bytes", len(encoded))
 	}
 	return nil
+}
+
+func safeToken(value string) bool {
+	if value == "" || len(value) > 160 {
+		return false
+	}
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func isSHA256(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, r := range value {
+		if (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F') || (r >= '0' && r <= '9') {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 type WorkspaceSpec struct {
@@ -148,13 +221,15 @@ func (w WorkspaceSpec) Validate() error {
 	if filepath.IsAbs(w.Path) {
 		return errors.New("workspace.path must be relative")
 	}
-	for _, component := range strings.FieldsFunc(w.Path, func(r rune) bool { return r == '/' || r == '\\' }) {
+	portablePath := strings.ReplaceAll(w.Path, "\\", "/")
+	if strings.HasPrefix(portablePath, "/") || strings.HasSuffix(portablePath, "/") ||
+		strings.Contains(portablePath, "//") || strings.Contains(w.Path, ":") {
+		return errors.New("workspace.path must not contain absolute, drive, or empty components")
+	}
+	for _, component := range strings.Split(portablePath, "/") {
 		if component == ".." || component == "." {
 			return errors.New("workspace.path cannot contain . or .. components")
 		}
-	}
-	if strings.Contains(w.Path, "//") || strings.Contains(w.Path, `\\`) {
-		return errors.New("workspace.path cannot contain empty components")
 	}
 	switch w.Mode {
 	case "read", "write":
@@ -180,10 +255,12 @@ func (e ExecutionSpec) Validate() error {
 }
 
 type TaskRequest struct {
-	Mutation  `json:",inline"`
-	Context   ContextPackage `json:"context"`
-	Workspace WorkspaceSpec  `json:"workspace"`
-	Execution ExecutionSpec  `json:"execution"`
+	Mutation                    `json:",inline"`
+	SupervisorPrincipal         string         `json:"supervisorPrincipal,omitempty"`
+	SupervisorCertificateSHA256 string         `json:"supervisorCertificateSHA256,omitempty"`
+	Context                     ContextPackage `json:"context"`
+	Workspace                   WorkspaceSpec  `json:"workspace"`
+	Execution                   ExecutionSpec  `json:"execution"`
 }
 
 func (r TaskRequest) Validate() error {
@@ -232,15 +309,19 @@ func DecodeTaskRequest(payload []byte) (TaskRequest, error) {
 }
 
 type TaskRecord struct {
-	Mutation            `json:",inline"`
-	State               TaskState `json:"state"`
-	WorkspaceKey        string    `json:"workspaceKey"`
-	SupervisorPrincipal string    `json:"supervisorPrincipal,omitempty"`
-	ChildIdentity       string    `json:"childIdentity,omitempty"`
-	LastEventSeq        uint64    `json:"lastEventSeq"`
-	UpdatedAt           time.Time `json:"updatedAt"`
-	Handoff             *Handoff  `json:"handoff,omitempty"`
-	Fenced              bool      `json:"fenced"`
+	Mutation                    `json:",inline"`
+	State                       TaskState     `json:"state"`
+	WorkspaceKey                string        `json:"workspaceKey"`
+	Workspace                   WorkspaceSpec `json:"workspace"`
+	Execution                   ExecutionSpec `json:"execution"`
+	SupervisorPrincipal         string        `json:"supervisorPrincipal,omitempty"`
+	SupervisorCertificateSHA256 string        `json:"supervisorCertificateSHA256,omitempty"`
+	ChildIdentity               string        `json:"childIdentity,omitempty"`
+	ThreadID                    string        `json:"threadId,omitempty"`
+	LastEventSeq                uint64        `json:"lastEventSeq"`
+	UpdatedAt                   time.Time     `json:"updatedAt"`
+	Handoff                     *Handoff      `json:"handoff,omitempty"`
+	Fenced                      bool          `json:"fenced"`
 }
 
 type TaskEvent struct {

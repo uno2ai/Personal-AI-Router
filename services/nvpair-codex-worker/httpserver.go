@@ -6,7 +6,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"nvpair-shared/clustertrust"
 	"nvpair-shared/codexprotocol"
 )
 
@@ -44,8 +47,12 @@ type workerHTTPServer struct {
 	store          *TaskStore
 	factory        AppServerFactory
 	policy         WorkspacePolicy
+	artifacts      *ArtifactStore
 	maxConcurrency int
 	authToken      string
+	mesh           *clustertrust.Mesh
+	allowedPeers   map[string]bool
+	toolLabels     []string
 
 	mu     sync.Mutex
 	active map[string]*taskRun
@@ -62,6 +69,29 @@ func NewServerWithCapacity(store *TaskStore, factory AppServerFactory, policy Wo
 }
 
 func NewServerWithCapacityAndAuth(store *TaskStore, factory AppServerFactory, policy WorkspacePolicy, maxConcurrency int, authToken string) http.Handler {
+	return newWorkerServer(store, factory, policy, nil, maxConcurrency, authToken)
+}
+
+func NewServerWithArtifacts(store *TaskStore, factory AppServerFactory, policy WorkspacePolicy, artifacts *ArtifactStore, maxConcurrency int, authToken string) http.Handler {
+	return newWorkerServer(store, factory, policy, artifacts, maxConcurrency, authToken)
+}
+
+// NewServerWithSecurity enables the later PAIR mTLS boundary. When mesh is
+// non-nil, bearer/loopback authentication is not used and every request is
+// revalidated against the current certificate pin before routing.
+func NewServerWithSecurity(store *TaskStore, factory AppServerFactory, policy WorkspacePolicy, artifacts *ArtifactStore, maxConcurrency int, mesh *clustertrust.Mesh, allowedPeers []string) *workerHTTPServer {
+	server := newWorkerServer(store, factory, policy, artifacts, maxConcurrency, "").(*workerHTTPServer)
+	server.mesh = mesh
+	server.allowedPeers = make(map[string]bool, len(allowedPeers))
+	for _, peer := range allowedPeers {
+		if peer != "" {
+			server.allowedPeers[peer] = true
+		}
+	}
+	return server
+}
+
+func newWorkerServer(store *TaskStore, factory AppServerFactory, policy WorkspacePolicy, artifacts *ArtifactStore, maxConcurrency int, authToken string) http.Handler {
 	if maxConcurrency <= 0 {
 		maxConcurrency = 1
 	}
@@ -69,6 +99,7 @@ func NewServerWithCapacityAndAuth(store *TaskStore, factory AppServerFactory, po
 		store:          store,
 		factory:        factory,
 		policy:         policy,
+		artifacts:      artifacts,
 		maxConcurrency: maxConcurrency,
 		authToken:      authToken,
 		active:         make(map[string]*taskRun),
@@ -117,12 +148,31 @@ func (s *workerHTTPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *workerHTTPServer) authorize(w http.ResponseWriter, r *http.Request) bool {
-	if s.authToken != "" {
-		provided := strings.TrimSpace(r.Header.Get("Authorization"))
-		expected := "Bearer " + s.authToken
-		if subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) != 1 {
-			w.Header().Set("WWW-Authenticate", `Bearer realm="codex-worker"`)
-			writeError(w, http.StatusUnauthorized, "Worker authorization required")
+	if s.mesh != nil {
+		s.mesh.Refresh()
+		principal, ok := s.mesh.VerifyClientPin(r)
+		if !ok {
+			writeError(w, http.StatusForbidden, "current PAIR certificate pin is required")
+			return false
+		}
+		if len(s.allowedPeers) == 0 || !s.allowedPeers[principal] {
+			writeError(w, http.StatusForbidden, "Supervisor principal is not authorized")
+			return false
+		}
+		*r = *r.WithContext(context.WithValue(r.Context(), supervisorPrincipalKey{}, principal))
+	} else {
+		if s.authToken != "" {
+			provided := strings.TrimSpace(r.Header.Get("Authorization"))
+			expected := "Bearer " + s.authToken
+			if subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) != 1 {
+				w.Header().Set("WWW-Authenticate", `Bearer realm="codex-worker"`)
+				writeError(w, http.StatusUnauthorized, "Worker authorization required")
+				return false
+			}
+		}
+		host, _, err := net.SplitHostPort(r.Host)
+		if err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() {
+			writeError(w, http.StatusForbidden, "request Host must be a loopback address")
 			return false
 		}
 	}
@@ -130,10 +180,12 @@ func (s *workerHTTPServer) authorize(w http.ResponseWriter, r *http.Request) boo
 		writeError(w, http.StatusForbidden, "browser origins are not accepted")
 		return false
 	}
-	host, _, err := net.SplitHostPort(r.Host)
-	if err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() {
-		writeError(w, http.StatusForbidden, "request Host must be a loopback address")
-		return false
+	if s.mesh == nil {
+		host, _, err := net.SplitHostPort(r.Host)
+		if err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() {
+			writeError(w, http.StatusForbidden, "request Host must be a loopback address")
+			return false
+		}
 	}
 	if r.Method == http.MethodPost && !strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "application/json") {
 		writeError(w, http.StatusUnsupportedMediaType, "POST requests require application/json")
@@ -143,15 +195,45 @@ func (s *workerHTTPServer) authorize(w http.ResponseWriter, r *http.Request) boo
 }
 
 func (s *workerHTTPServer) handleWorker(w http.ResponseWriter) {
+	principal := ""
+	if s.mesh != nil {
+		principal = s.mesh.NodeUUID()
+	}
+	available := s.maxConcurrency
+	s.mu.Lock()
+	available -= len(s.active)
+	s.mu.Unlock()
+	capabilities := codexprotocol.WorkerCapabilities{
+		ProtocolVersion:  codexprotocol.ProtocolVersion,
+		WorkerVersion:    Version,
+		AppServerVersion: SupportedAppServerVersion,
+		OS:               runtime.GOOS,
+		Architecture:     runtime.GOARCH,
+		WorkspaceAliases: []string{"local"},
+		WorkspaceModes:   []string{"read", "write"},
+		ToolLabels:       append([]string(nil), s.toolLabels...),
+		SandboxModes:     []string{"read-only", "workspace-write"},
+		ApprovalModes:    []string{"local-only"},
+		MaxConcurrency:   s.maxConcurrency,
+		AvailableSlots:   available,
+	}
+	if err := capabilities.Validate(); err != nil {
+		writeError(w, http.StatusInternalServerError, "Worker capabilities are invalid")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"protocolVersion": codexprotocol.ProtocolVersion,
 		"version":         Version,
-		"capabilities": map[string]any{
-			"os":             runtime.GOOS,
-			"architecture":   runtime.GOARCH,
-			"maxConcurrency": s.maxConcurrency,
-		},
+		"principal":       principal,
+		"capabilities":    capabilities,
 	})
+}
+
+type supervisorPrincipalKey struct{}
+
+func supervisorPrincipal(r *http.Request) string {
+	principal, _ := r.Context().Value(supervisorPrincipalKey{}).(string)
+	return principal
 }
 
 func (s *workerHTTPServer) handleCreate(w http.ResponseWriter, r *http.Request) {
@@ -179,6 +261,8 @@ func (s *workerHTTPServer) handleCreate(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	request.SupervisorPrincipal = supervisorPrincipal(r)
+	request.SupervisorCertificateSHA256 = supervisorCertificateSHA256(r)
 	cwd, err := s.policy.Resolve(request.Workspace)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -196,6 +280,60 @@ func (s *workerHTTPServer) handleCreate(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusAccepted, TaskResponse{Record: record, Idempotent: idempotent})
 }
 
+// RevocationLoop implements the documented polling bound for active tasks. It
+// intentionally uses Mesh.Refresh and current pin lookup rather than trusting
+// a cached HTTP connection or a prior authorization decision.
+func (s *workerHTTPServer) RevocationLoop(ctx context.Context) {
+	if s.mesh == nil {
+		return
+	}
+	ticker := time.NewTicker(clustertrust.RefreshInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.mesh.Refresh()
+			s.mu.Lock()
+			runs := make([]*taskRun, 0, len(s.active))
+			for taskID, run := range s.active {
+				record, ok := s.store.Get(taskID)
+				if ok && supervisorPinIsStale(s.mesh, record) {
+					runs = append(runs, run)
+				}
+			}
+			s.mu.Unlock()
+			for _, run := range runs {
+				run.session.Cancel()
+				run.cancel()
+			}
+		}
+	}
+}
+
+func supervisorCertificateSHA256(r *http.Request) string {
+	if r == nil || r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+		return ""
+	}
+	digest := sha256.Sum256(r.TLS.PeerCertificates[0].Raw)
+	return hex.EncodeToString(digest[:])
+}
+
+func supervisorPinIsStale(mesh *clustertrust.Mesh, record codexprotocol.TaskRecord) bool {
+	if mesh == nil || record.SupervisorPrincipal == "" {
+		return false
+	}
+	current, pinned := mesh.PinnedCertificateSHA256(record.SupervisorPrincipal)
+	if !pinned {
+		return true
+	}
+	// Records from before certificate-digest persistence remain protected by
+	// principal revocation. New mTLS records additionally fence same-principal
+	// certificate rotation.
+	return record.SupervisorCertificateSHA256 != "" && current != record.SupervisorCertificateSHA256
+}
+
 func (s *workerHTTPServer) handleTask(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/v1/tasks/"), "/")
 	if len(parts) == 1 && r.Method == http.MethodGet {
@@ -206,6 +344,10 @@ func (s *workerHTTPServer) handleTask(w http.ResponseWriter, r *http.Request) {
 		s.handleEvents(w, r, parts[0])
 		return
 	}
+	if len(parts) == 2 && parts[1] == "turns" && r.Method == http.MethodPost {
+		s.handleTurn(w, r, parts[0])
+		return
+	}
 	if len(parts) == 2 && parts[1] == "result" && r.Method == http.MethodGet {
 		s.handleResult(w, parts[0])
 		return
@@ -214,7 +356,125 @@ func (s *workerHTTPServer) handleTask(w http.ResponseWriter, r *http.Request) {
 		s.handleCancel(w, r, parts[0])
 		return
 	}
+	if len(parts) == 3 && parts[1] == "artifacts" && r.Method == http.MethodGet {
+		s.handleArtifact(w, r, parts[0], parts[2])
+		return
+	}
 	http.NotFound(w, r)
+}
+
+type followUpRequest struct {
+	codexprotocol.Mutation
+	Context codexprotocol.ContextPackage `json:"context"`
+}
+
+func (s *workerHTTPServer) handleTurn(w http.ResponseWriter, r *http.Request, taskID string) {
+	payload, err := readBoundedBody(w, r, codexprotocol.MaxContextBytes)
+	if err != nil {
+		writeError(w, http.StatusRequestEntityTooLarge, err.Error())
+		return
+	}
+	var followUp followUpRequest
+	if err := decodeSingleJSON(payload, &followUp); err != nil {
+		writeError(w, http.StatusBadRequest, "decode follow-up: "+err.Error())
+		return
+	}
+	if followUp.TaskID != taskID {
+		writeError(w, http.StatusConflict, "taskId does not match request path")
+		return
+	}
+	if err := followUp.Context.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.mu.Lock()
+	_, active := s.active[taskID]
+	closed := s.closed
+	s.mu.Unlock()
+	if active {
+		writeError(w, http.StatusConflict, "task already has an active turn")
+		return
+	}
+	if closed {
+		writeError(w, http.StatusServiceUnavailable, "Worker is shutting down")
+		return
+	}
+	record, ok := s.store.Get(taskID)
+	if !ok {
+		writeStoreError(w, ErrTaskNotFound)
+		return
+	}
+	cwd, err := s.policy.Resolve(record.Workspace)
+	if err != nil {
+		writeError(w, http.StatusConflict, "workspace is no longer available")
+		return
+	}
+	record, err = s.store.PrepareFollowUp(followUp.Mutation)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	request := codexprotocol.TaskRequest{
+		Mutation:            record.Mutation,
+		SupervisorPrincipal: record.SupervisorPrincipal,
+		Context:             followUp.Context,
+		Workspace:           record.Workspace,
+		Execution:           record.Execution,
+	}
+	s.mu.Lock()
+	s.runs.Add(1)
+	s.mu.Unlock()
+	go s.runTaskWithResume(request, record, cwd, record.ThreadID)
+	writeJSON(w, http.StatusAccepted, TaskResponse{Record: record})
+}
+
+func (s *workerHTTPServer) handleArtifact(w http.ResponseWriter, _ *http.Request, taskID, artifactID string) {
+	if s.artifacts == nil {
+		writeError(w, http.StatusNotFound, "artifact transport is not configured")
+		return
+	}
+	record, ok := s.store.Get(taskID)
+	if !ok || record.Handoff == nil {
+		writeError(w, http.StatusNotFound, "artifact not declared for task")
+		return
+	}
+	manifest, declared := declaredArtifact(*record.Handoff, artifactID)
+	if !declared {
+		writeError(w, http.StatusNotFound, "artifact not declared for task")
+		return
+	}
+	data, err := s.artifacts.Read(taskID, artifactID)
+	if err != nil {
+		if errors.Is(err, ErrArtifactTooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, err.Error())
+			return
+		}
+		writeError(w, http.StatusNotFound, "artifact not found")
+		return
+	}
+	digest := sha256.Sum256(data)
+	if manifest.Bytes != int64(len(data)) || !strings.EqualFold(manifest.SHA256, hex.EncodeToString(digest[:])) {
+		writeError(w, http.StatusConflict, "staged artifact digest mismatch")
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
+func handoffDeclaresArtifact(handoff codexprotocol.Handoff, artifactID string) bool {
+	_, ok := declaredArtifact(handoff, artifactID)
+	return ok
+}
+
+func declaredArtifact(handoff codexprotocol.Handoff, artifactID string) (codexprotocol.ArtifactManifest, bool) {
+	for _, artifact := range handoff.Artifacts {
+		if artifact.ID == artifactID {
+			return artifact, true
+		}
+	}
+	return codexprotocol.ArtifactManifest{}, false
 }
 
 func (s *workerHTTPServer) handleStatus(w http.ResponseWriter, taskID string) {
@@ -328,12 +588,16 @@ func decodeSingleJSON(payload []byte, target any) error {
 }
 
 func (s *workerHTTPServer) runTask(request codexprotocol.TaskRequest, record codexprotocol.TaskRecord, cwd string) {
+	s.runTaskWithResume(request, record, cwd, "")
+}
+
+func (s *workerHTTPServer) runTaskWithResume(request codexprotocol.TaskRequest, record codexprotocol.TaskRecord, cwd, resumeThreadID string) {
 	defer s.runs.Done()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(request.Context.Limits.WallSeconds)*time.Second)
 	session := s.factory.New()
 	s.mu.Lock()
-	run := &taskRun{session: session, cancel: cancel, done: make(chan struct{})}
-	s.active[record.TaskID] = run
+	activeRun := &taskRun{session: session, cancel: cancel, done: make(chan struct{})}
+	s.active[record.TaskID] = activeRun
 	shuttingDown := s.closed
 	s.mu.Unlock()
 	defer func() {
@@ -341,7 +605,7 @@ func (s *workerHTTPServer) runTask(request codexprotocol.TaskRequest, record cod
 		delete(s.active, record.TaskID)
 		s.mu.Unlock()
 		cancel()
-		close(run.done)
+		close(activeRun.done)
 	}()
 
 	if shuttingDown {
@@ -384,7 +648,15 @@ func (s *workerHTTPServer) runTask(request codexprotocol.TaskRequest, record cod
 	runtimeRequest.Workspace.Path = verifiedCWD
 	var eventNumber uint64
 	var persistenceErr error
-	handoff, err := session.RunWithChild(ctx, runtimeRequest, func(event codexprotocol.TaskEvent) {
+	var execute func(context.Context, codexprotocol.TaskRequest, func(codexprotocol.TaskEvent), func(string) error, func(string) error) (codexprotocol.Handoff, error)
+	if resumeThreadID == "" {
+		execute = session.RunWithChildAndThread
+	} else {
+		execute = func(runCtx context.Context, taskRequest codexprotocol.TaskRequest, emit func(codexprotocol.TaskEvent), onChild func(string) error, _ func(string) error) (codexprotocol.Handoff, error) {
+			return session.RunFollowUpWithChild(runCtx, taskRequest, resumeThreadID, emit, onChild)
+		}
+	}
+	handoff, err := execute(ctx, runtimeRequest, func(event codexprotocol.TaskEvent) {
 		if event.State.Terminal() {
 			return
 		}
@@ -406,6 +678,13 @@ func (s *workerHTTPServer) runTask(request codexprotocol.TaskRequest, record cod
 		mutation.RequestID = record.RequestID + ":child"
 		return s.store.Mutate(mutation, func(current *codexprotocol.TaskRecord) error {
 			current.ChildIdentity = identity
+			return nil
+		})
+	}, func(threadID string) error {
+		mutation := record.Mutation
+		mutation.RequestID = record.RequestID + ":thread"
+		return s.store.Mutate(mutation, func(current *codexprotocol.TaskRecord) error {
+			current.ThreadID = threadID
 			return nil
 		})
 	})
@@ -434,6 +713,17 @@ func (s *workerHTTPServer) runTask(request codexprotocol.TaskRequest, record cod
 			AttemptID: record.AttemptID,
 			Status:    codexprotocol.StateFailed,
 			Summary:   "invalid app-server handoff",
+		}
+	}
+	if s.artifacts != nil && len(handoff.Artifacts) > 0 {
+		if err := s.artifacts.StageHandoff(record.TaskID, cwd, &handoff); err != nil {
+			handoff = codexprotocol.Handoff{
+				Version:   codexprotocol.HandoffVersion,
+				TaskID:    record.TaskID,
+				AttemptID: record.AttemptID,
+				Status:    codexprotocol.StateFailed,
+				Summary:   "declared artifact rejected by Worker policy",
+			}
 		}
 	}
 	mutation := record.Mutation

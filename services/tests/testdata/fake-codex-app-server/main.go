@@ -41,10 +41,14 @@ func main() {
 		}
 		switch message.Method {
 		case "initialize":
-			_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": message.ID, "result": map[string]any{}})
+			result := map[string]any{}
+			if os.Getenv("CODEX_FAKE_UNSUPPORTED") != "1" {
+				result = map[string]any{"userAgent": "Codex CLI/fixture", "platformFamily": "unix", "platformOs": "test"}
+			}
+			_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": message.ID, "result": result})
 		case "initialized":
 			initialized = true
-		case "thread/start":
+		case "thread/start", "thread/resume":
 			if !initialized {
 				_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": message.ID, "error": map[string]any{"code": -32000, "message": "initialized notification required"}})
 				continue

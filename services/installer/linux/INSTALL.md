@@ -23,6 +23,8 @@ You should end up with this layout:
 NVIDIA-Personal-AI-Router-<version>/
 ├── bin/
 │   ├── nvpair-ui-broker              # primary entry point (JSON-RPC over stdio / IPC)
+│   ├── nvpair-codex-worker            # native Codex execution gateway
+│   ├── nvpair-codex-supervisor        # Main Codex local MCP bridge
 │   ├── ollama-proxy
 │   ├── lmstudio-proxy
 │   ├── nvpair-node-info
@@ -51,6 +53,34 @@ Unix socket via `--ipc`):
 
 The bundled UI connects to the broker over this contract. Other clients can use
 the same API; see the `nvpair-ui-broker` README for its JSON-RPC surface.
+
+### Native Codex Worker
+
+For a local Worker/Supervisor pair:
+
+```bash
+WORKER_TOKEN="$(openssl rand -hex 32)"
+./bin/nvpair-codex-worker --workspace-root "$PWD" --listen 127.0.0.1:14324 --auth-token "$WORKER_TOKEN"
+./bin/nvpair-codex-supervisor --worker-url http://127.0.0.1:14324 --worker-token "$WORKER_TOKEN"
+```
+
+For a paired remote Worker, use TCP 14324 with PAIR's shared cluster
+directory. The Worker verifies the Main Supervisor certificate against the
+current pin before every request:
+
+```bash
+./bin/nvpair-codex-worker --workspace-root /srv/project \
+  --listen 0.0.0.0:14324 --cluster-dir "$PAIR_CLUSTER_DIR" \
+  --supervisor-allowlist "$MAIN_SUPERVISOR_PRINCIPAL"
+```
+
+The Supervisor stays local to Main Codex and can consume a PAIR
+`discovery:nodes` snapshot with `--discovery-file`; no fixed-port scan is used.
+For boot-time operation, adapt the bundled `nvpair-codex-worker.service`
+template, set the
+workspace/state/cluster paths, install it for the intended user, and enable it
+with `systemctl --user` (or run it under the host's service manager). Do not
+run the Worker as root unless that is the deliberate workspace owner.
 
 ## 3. Uninstall
 

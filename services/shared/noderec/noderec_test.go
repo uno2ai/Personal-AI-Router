@@ -94,6 +94,26 @@ func TestTXTEmitsUnknownServiceKey(t *testing.T) {
 	}
 }
 
+func TestTXTEmitsCodexWorkerService(t *testing.T) {
+	record := NodeRecord{HostUUID: "host", Services: map[ServiceKey]int{ServiceCodexWorker: 14324}}
+	txt := record.TXT()
+	if !containsTXT(txt, "cw=14324") {
+		t.Fatalf("TXT=%v does not advertise Codex Worker", txt)
+	}
+	if port, ok := ParseTXT(txt).Port(ServiceCodexWorker); !ok || port != 14324 {
+		t.Fatalf("parsed cw=(%d,%v)", port, ok)
+	}
+}
+
+func containsTXT(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
+}
+
 func TestTXTRoundTrip(t *testing.T) {
 	orig := NodeRecord{
 		SchemaVersion: "1",
@@ -150,6 +170,7 @@ func TestTransportPolicy(t *testing.T) {
 		{ServiceEngineManager, TransportPlain, false, false},
 		{ServiceErrors, TransportMTLSWhenClustered, true, false},
 		{ServiceWorkload, TransportMTLSWhenClustered, true, false},
+		{ServiceCodexWorker, TransportMTLSWhenClustered, true, false},
 		{ServiceCluster, TransportSplit, true, false},
 	}
 	for _, c := range cases {

@@ -24,6 +24,11 @@ import (
 // build time. Development binaries intentionally report dev.
 var Version = "dev"
 
+// SupportedAppServerVersion is the semantic adapter contract, not the CLI's
+// human-facing version string. The adapter fails closed when the initialize
+// response does not negotiate this contract.
+const SupportedAppServerVersion = "codex-app-server-v1"
+
 type AppServerFactory struct {
 	binary string
 }
@@ -54,6 +59,24 @@ func (s *AppServerSession) Run(ctx context.Context, request codexprotocol.TaskRe
 }
 
 func (s *AppServerSession) RunWithChild(ctx context.Context, request codexprotocol.TaskRequest, emit func(codexprotocol.TaskEvent), onChild func(string) error) (codexprotocol.Handoff, error) {
+	return s.runWithThread(ctx, request, emit, onChild, nil, "")
+}
+
+func (s *AppServerSession) RunWithChildAndThread(ctx context.Context, request codexprotocol.TaskRequest, emit func(codexprotocol.TaskEvent), onChild func(string) error, onThread func(string) error) (codexprotocol.Handoff, error) {
+	return s.runWithThread(ctx, request, emit, onChild, onThread, "")
+}
+
+// RunFollowUpWithChild resumes a previously persisted native thread in a new
+// local app-server child. The task/lease fencing is owned by the Worker store;
+// this method only performs the native thread/resume + turn/start exchange.
+func (s *AppServerSession) RunFollowUpWithChild(ctx context.Context, request codexprotocol.TaskRequest, threadID string, emit func(codexprotocol.TaskEvent), onChild func(string) error) (codexprotocol.Handoff, error) {
+	if strings.TrimSpace(threadID) == "" {
+		return codexprotocol.Handoff{}, errors.New("app-server follow-up requires a persisted thread id")
+	}
+	return s.runWithThread(ctx, request, emit, onChild, nil, threadID)
+}
+
+func (s *AppServerSession) runWithThread(ctx context.Context, request codexprotocol.TaskRequest, emit func(codexprotocol.TaskEvent), onChild func(string) error, onThread func(string) error, resumeThreadID string) (codexprotocol.Handoff, error) {
 	cwd, err := appServerCWD(request.Workspace.Path)
 	if err != nil {
 		return codexprotocol.Handoff{}, err
@@ -137,20 +160,35 @@ func (s *AppServerSession) RunWithChild(ctx context.Context, request codexprotoc
 		})
 	}()
 
-	if err := s.call(callCtx, peer, "initialize", map[string]any{
+	initializeResult, err := s.callResult(callCtx, peer, "initialize", map[string]any{
 		"clientInfo": map[string]string{"name": "nvpair-codex-worker", "version": Version},
-	}); err != nil {
+	})
+	if err != nil {
+		return s.failedProcess(cmd, stdin, peer, waitCh, serveDone, err)
+	}
+	if err := validateAppServerInitialize(initializeResult); err != nil {
 		return s.failedProcess(cmd, stdin, peer, waitCh, serveDone, err)
 	}
 	if err := peer.Notify("initialized", map[string]any{}); err != nil {
 		return s.failedProcess(cmd, stdin, peer, waitCh, serveDone, fmt.Errorf("app-server initialized: %w", err))
 	}
-	threadResult, err := s.callResult(callCtx, peer, "thread/start", map[string]any{
-		"cwd":            cwd,
-		"sandbox":        sandboxFor(request.Execution.Sandbox),
-		"approvalPolicy": "on-request",
-		"ephemeral":      true,
-	})
+	var threadResult json.RawMessage
+	if resumeThreadID == "" {
+		threadResult, err = s.callResult(callCtx, peer, "thread/start", map[string]any{
+			"cwd":            cwd,
+			"sandbox":        sandboxFor(request.Execution.Sandbox),
+			"approvalPolicy": "on-request",
+			"ephemeral":      false,
+		})
+	} else {
+		threadResult, err = s.callResult(callCtx, peer, "thread/resume", map[string]any{
+			"threadId":       resumeThreadID,
+			"cwd":            cwd,
+			"sandbox":        sandboxFor(request.Execution.Sandbox),
+			"approvalPolicy": "on-request",
+			"excludeTurns":   true,
+		})
+	}
 	if err != nil {
 		return s.failedProcess(cmd, stdin, peer, waitCh, serveDone, err)
 	}
@@ -162,7 +200,15 @@ func (s *AppServerSession) RunWithChild(ctx context.Context, request codexprotoc
 	if err := json.Unmarshal(threadResult, &thread); err != nil || thread.Thread.ID == "" {
 		return s.failedProcess(cmd, stdin, peer, waitCh, serveDone, errors.New("app-server thread/start returned no thread id"))
 	}
+	if resumeThreadID != "" && thread.Thread.ID != resumeThreadID {
+		return s.failedProcess(cmd, stdin, peer, waitCh, serveDone, errors.New("app-server thread/resume returned a different thread id"))
+	}
 	state.setThreadID(thread.Thread.ID)
+	if onThread != nil {
+		if err := onThread(thread.Thread.ID); err != nil {
+			return s.failedProcess(cmd, stdin, peer, waitCh, serveDone, fmt.Errorf("persist app-server thread identity: %w", err))
+		}
+	}
 	turnResult, err := s.callResult(callCtx, peer, "turn/start", map[string]any{
 		"threadId": thread.Thread.ID,
 		"input": []map[string]string{{
@@ -230,6 +276,29 @@ func (s *AppServerSession) RunWithChild(ctx context.Context, request codexprotoc
 		}
 		return codexprotocol.Handoff{}, fmt.Errorf("app-server exited before completion: %w", err)
 	}
+}
+
+// validateAppServerInitialize is the adapter's fail-closed compatibility
+// boundary. The currently installed native app-server does not expose a
+// separate protocol-version field; its initialize result identifies the
+// implementation through userAgent. An empty or non-Codex result is therefore
+// incompatible instead of being treated as a best-effort implementation.
+func validateAppServerInitialize(raw json.RawMessage) error {
+	var result struct {
+		UserAgent      string `json:"userAgent"`
+		PlatformFamily string `json:"platformFamily"`
+		PlatformOS     string `json:"platformOs"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return fmt.Errorf("app-server initialize returned invalid result: %w", err)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(result.UserAgent), "Codex ") {
+		return errors.New("unsupported app-server initialize response")
+	}
+	if strings.TrimSpace(result.PlatformFamily) == "" || strings.TrimSpace(result.PlatformOS) == "" {
+		return errors.New("unsupported app-server initialize platform metadata")
+	}
+	return nil
 }
 
 func (s *AppServerSession) Cancel() {

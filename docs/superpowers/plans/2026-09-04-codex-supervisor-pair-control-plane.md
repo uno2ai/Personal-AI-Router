@@ -5,6 +5,11 @@ SPDX-License-Identifier: Apache-2.0
 
 # Native Codex Supervisor over PAIR Implementation Plan
 
+> **Completion note (2026-09-05):** This plan was executed and extended through
+> all five phases of the canonical specification. The historical Phase 1
+> checklist below remains as an implementation trace; final status and command
+> evidence are recorded in the canonical spec's §17.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build the Phase 1 local vertical slice in which Main Codex calls a real local MCP server, the Supervisor submits a bounded task to a Worker Gateway, and the Worker launches native `codex app-server` in a policy-checked local workspace and returns a durable, compact handoff.
@@ -479,4 +484,4 @@ git commit -s -m "test: verify local Codex supervisor flow"
 - M4: enforced in Task 2 and Task 7 for JSONL replay and duplicate-turn prevention.
 - M5: enforced in Task 2 for Worker-authoritative capacity/workspace lease behavior; no UX assumption is used as a lock.
 
-The plan intentionally implements only the independently testable local vertical slice. Phase 2 service registration, Phase 3 pinned mTLS/revocation, Phase 4 capability/artifact transport, and Phase 5 cross-platform packaging each remain separate follow-on plans because they have independent security and integration gates.
+Implementation status: the historical task sequence was carried through all five phases. The local vertical slice, PAIR service registration/discovery, pinned mTLS and revocation, capability-aware scheduling, durable artifact transport, reconnectable event endpoint, approval boundary, lease/fencing/restart safety, and cross-platform packaging are implemented in the current tree. Final acceptance evidence and release verification are recorded in §17 of the canonical specification.

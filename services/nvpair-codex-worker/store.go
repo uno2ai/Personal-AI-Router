@@ -95,6 +95,61 @@ func (s *TaskStore) Accept(request codexprotocol.TaskRequest) (codexprotocol.Tas
 	return s.AcceptAt(request, request.Workspace.ID+"\x00"+request.Workspace.Path, 1)
 }
 
+// PrepareFollowUp reopens a terminal, unfenced task for a bounded follow-up on
+// its persisted native thread. It advances the lease epoch before the child is
+// started, so the previous terminal attempt can never mutate the reopened task.
+func (s *TaskStore) PrepareFollowUp(mutation codexprotocol.Mutation) (codexprotocol.TaskRecord, error) {
+	if err := mutation.Validate(); err != nil {
+		return codexprotocol.TaskRecord{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	hash := hashMutation(mutation)
+	if previous, ok := s.appliedMutations[mutation.RequestID]; ok {
+		if previous != hash {
+			return codexprotocol.TaskRecord{}, ErrRequestConflict
+		}
+		record, exists := s.records[mutation.TaskID]
+		if !exists {
+			return codexprotocol.TaskRecord{}, ErrTaskNotFound
+		}
+		return record, nil
+	}
+	record, exists := s.records[mutation.TaskID]
+	if !exists {
+		return codexprotocol.TaskRecord{}, ErrTaskNotFound
+	}
+	if record.AttemptID != mutation.AttemptID || record.LeaseEpoch != mutation.LeaseEpoch {
+		return codexprotocol.TaskRecord{}, ErrStaleLease
+	}
+	if !record.State.Terminal() || record.State == codexprotocol.StateLost || record.Fenced {
+		return codexprotocol.TaskRecord{}, ErrTaskBusy
+	}
+	if record.ThreadID == "" {
+		return codexprotocol.TaskRecord{}, errors.New("task has no resumable native thread")
+	}
+	if owner, busy := s.workspaceLeases[record.WorkspaceKey]; busy && owner != record.TaskID {
+		return codexprotocol.TaskRecord{}, ErrWorkspaceBusy
+	}
+	next := record
+	next.Mutation = mutation
+	next.LeaseEpoch++
+	next.Mutation.LeaseEpoch = next.LeaseEpoch
+	next.State = codexprotocol.StateAccepted
+	next.Handoff = nil
+	next.ChildIdentity = ""
+	next.Fenced = false
+	next.UpdatedAt = time.Now().UTC()
+	event := codexprotocol.TaskEvent{TaskID: next.TaskID, AttemptID: next.AttemptID, LeaseEpoch: next.LeaseEpoch, Seq: next.LastEventSeq + 1, State: next.State, Kind: "followup_accepted", At: next.UpdatedAt}
+	next.LastEventSeq = event.Seq
+	entry := journalEntry{Kind: "mutate", RequestID: mutation.RequestID, MutationHash: hash, Record: next, Event: &event}
+	if err := s.journal.Append(entry); err != nil {
+		return codexprotocol.TaskRecord{}, err
+	}
+	s.apply(entry)
+	return next, nil
+}
+
 // AcceptAt atomically admits a task against the canonical workspace lease key
 // and the Worker capacity limit. The HTTP boundary must pass the policy-
 // resolved path here; request.Workspace.Path is only a user-facing alias.
@@ -143,10 +198,14 @@ func (s *TaskStore) AcceptAt(request codexprotocol.TaskRequest, canonicalWorkspa
 	}
 	now := time.Now().UTC()
 	record := codexprotocol.TaskRecord{
-		Mutation:     request.Mutation,
-		State:        codexprotocol.StateAccepted,
-		WorkspaceKey: workspaceKey,
-		UpdatedAt:    now,
+		Mutation:                    request.Mutation,
+		State:                       codexprotocol.StateAccepted,
+		WorkspaceKey:                workspaceKey,
+		Workspace:                   request.Workspace,
+		Execution:                   request.Execution,
+		SupervisorPrincipal:         request.SupervisorPrincipal,
+		SupervisorCertificateSHA256: request.SupervisorCertificateSHA256,
+		UpdatedAt:                   now,
 	}
 	entry := journalEntry{
 		Kind:        "accept",

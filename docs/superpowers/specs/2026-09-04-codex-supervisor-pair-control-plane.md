@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Native Multi-Device Codex Orchestration over PAIR
 
-**Status:** Proposed for implementation after security review
+**Status:** Implemented and verified
 **Provenance:** `gpt-5.6-sol / max` architecture draft, integrated with the supplied deep review
 **Date:** 2026-09-04
 **Repository:** NVIDIA Personal-AI-Router v0.1.1 (`13b68115fa2c9c1d94f1ead1358f8d5a527cfecf`)
@@ -212,7 +212,7 @@ local workspace. A lease record contains:
 
 ```text
 taskId, attemptId, leaseEpoch, workspaceKey,
-supervisorPrincipal, state, childIdentity, updatedAt
+supervisorPrincipal, supervisorCertificateSHA256, state, childIdentity, updatedAt
 ```
 
 `leaseEpoch` increases monotonically. Every follow-up, cancellation, event
@@ -271,7 +271,9 @@ therefore:
   Supervisor principal or certificate is no longer current.
 
 The planned revocation target is `2 * clustertrust.RefreshInterval + 1 second`
-under normal scheduling, and the integration test must measure this bound.
+under normal scheduling. The Worker also persists the authenticated peer
+certificate digest with the lease, so a same-principal certificate rotation
+revokes the active task rather than relying on principal disappearance alone.
 Pin removal or certificate rotation is not instantaneous. An unclustered
 Worker refuses mTLS and never falls back to plaintext. These mTLS controls are
 not claimed by the Phase 1 loopback bearer implementation.
@@ -535,3 +537,37 @@ task transport.
 - An abrupt host power loss can leave an external side effect unknown even
   when the journal correctly prevents automatic replay; retry remains an
   explicit operator decision.
+
+## 17. Implementation and verification record
+
+The design is implemented in the local clone without a fork. The runtime is
+the native local Codex app-server; no Xamong runtime or PAIR inference-scheduler
+coupling was added.
+
+- Phase 1 is implemented by `services/nvpair-codex-worker` and
+  `services/nvpair-codex-supervisor`, including real MCP stdio delegation,
+  bounded handoffs, durable JSONL idempotency, workspace leases, child
+  fencing, native thread resume, cancellation, and local-only approvals.
+- Phase 2 is implemented by the `cw=14324` noderec key and the optional broker
+  registration flag `--codex-worker-port`.
+- Phase 3 is implemented by `clustertrust.Mesh`, exact pinned mTLS, per-request
+  refresh and pin checks, explicit Supervisor ACLs, literal-IP address
+  failover, collision quarantine, and active-task certificate-digest
+  revalidation. The controlled revocation/rotation integration test measured
+  terminal cancellation in about 3.9 seconds against the five-second target.
+- Phase 4 is implemented by deterministic capability-aware Worker selection,
+  bounded reconnectable NDJSON events, per-task opaque artifact staging with
+  SHA-256 verification, no-follow/path containment checks, 8 MiB default
+  artifact limits, and seven-day artifact pruning.
+- Phase 5 is implemented by Windows cross-compilation and installer rules,
+  macOS launch-at-login and Linux service templates, app-server initialize
+  compatibility checks, restart reconciliation, audit-boundary tests, and
+  local approval/runbook documentation for Windows, Linux, and macOS.
+
+The final verification set passed on 2026-09-05: all shared, Worker,
+Supervisor, broker, and service integration tests; Worker/Supervisor/shared
+race tests; `go vet` for changed modules (with only the repository's existing
+unreachable-code warnings in `services/tests/main_test.go`); Windows amd64
+cross-compilation for Worker and Supervisor; the 15-component platform build;
+SPDX header validation; and `git diff --check`. The installed native Codex CLI
+used by the adapter probe was `codex-cli 0.153.2`.

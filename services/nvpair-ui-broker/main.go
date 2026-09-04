@@ -33,6 +33,7 @@ func main() {
 	settingsPath := flag.String("settings-path", "", "path to nvpair-node-settings binary (default: ./nvpair-node-settings in the current working directory)")
 	clusterMgrPath := flag.String("cluster-manager-path", "", "path to nvpair-cluster-manager binary (default: ./nvpair-cluster-manager in the current working directory)")
 	schedulerPath := flag.String("scheduler-path", "", "path to nvpair-job-scheduler binary (default: ./nvpair-job-scheduler in the current working directory)")
+	codexWorkerPort := flag.Int("codex-worker-port", 0, "advertised Codex Worker TCP port; 0 disables cw registration")
 	clusterDirFlag := flag.String("cluster-dir", "", "cluster config dir (node.crt/node.key + trusted/) the broker passes to its mDNS workers (nvpair-errors, nvpair-workload-manager, nvpair-node-info, nvpair-node-scanner, nvpair-manual-nodes) to enable cluster-scoped inter-node mTLS; defaults to the per-user Nvidia Corporation/Personal AI Router cluster/ dir, where nvpair-cluster-manager mints them")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	resolveLevel := applog.RegisterFlag(nil, slog.LevelInfo)
@@ -249,18 +250,19 @@ func main() {
 
 	codec := NewCodec(transport)
 	paths := workerPaths{
-		scanner:       resolvedScanner,
-		nodeInfo:      resolvedNodeInfo,
-		proxy:         resolvedProxy,
-		lmstudioProxy: resolvedLMStudioProxy,
-		workloadMgr:   resolvedWorkloadMgr,
-		errors:        resolvedErrors,
-		engineMgr:     resolvedEngineMgr,
-		manualNodes:   resolvedManualNodes,
-		settings:      resolvedSettings,
-		clusterMgr:    resolvedClusterMgr,
-		scheduler:     resolvedScheduler,
-		clusterDir:    clusterDir,
+		scanner:         resolvedScanner,
+		nodeInfo:        resolvedNodeInfo,
+		proxy:           resolvedProxy,
+		lmstudioProxy:   resolvedLMStudioProxy,
+		workloadMgr:     resolvedWorkloadMgr,
+		errors:          resolvedErrors,
+		engineMgr:       resolvedEngineMgr,
+		manualNodes:     resolvedManualNodes,
+		settings:        resolvedSettings,
+		clusterMgr:      resolvedClusterMgr,
+		scheduler:       resolvedScheduler,
+		codexWorkerPort: *codexWorkerPort,
+		clusterDir:      clusterDir,
 	}
 	if err := NewBroker(codec, paths).Serve(ctx); err != nil && ctx.Err() == nil {
 		fatalf("broker error: %v", err)

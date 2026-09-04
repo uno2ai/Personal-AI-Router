@@ -10,7 +10,7 @@
 // whose TXT map carries a schema version, the node's identity, its LAN address,
 // and one compact key per local service port, e.g.:
 //
-//	v=1;uuid=<hostUuid>;cluster-uuid=<clusterUuid>;ip=192.168.1.10;ni=14318;ol=11434;lm=1234;er=14319;wl=14320;cl=14321;em=14322
+//	v=1;uuid=<hostUuid>;cluster-uuid=<clusterUuid>;ip=192.168.1.10;ni=14318;ol=11434;lm=1234;er=14319;wl=14320;cl=14321;em=14322;cw=14324
 //
 // Design decisions this package encodes:
 //   - SRV port is a fixed, NON-authoritative constant; consumers ignore it and
@@ -100,13 +100,17 @@ const (
 	// is pin-based mTLS (cluster peers only) because it performs privileged
 	// operations, and it binds only when the node is clustered.
 	ServiceEngineControl ServiceKey = "ec"
+	// ServiceCodexWorker is the dedicated Supervisor Protocol endpoint. It is
+	// advertised only when the Worker is actually listening; discovery never
+	// infers it by scanning a fixed port.
+	ServiceCodexWorker ServiceKey = "cw"
 )
 
 // serviceKeyOrder is the deterministic emit order for service ports in TXT.
 var serviceKeyOrder = []ServiceKey{
 	ServiceNodeInfo, ServiceOllama, ServiceLMStudio,
 	ServiceErrors, ServiceWorkload, ServiceCluster, ServiceEngineManager,
-	ServiceEngineControl,
+	ServiceEngineControl, ServiceCodexWorker,
 }
 
 // Transport is the connection policy for a service, derived (not advertised).
@@ -117,7 +121,7 @@ const (
 	// the local inference engines).
 	TransportPlain Transport = iota
 	// TransportMTLSWhenClustered: cluster-scoped pin-based mTLS when the target
-	// node is clustered, else plain (nvpair-errors, nvpair-workload-manager).
+	// node is clustered, else plain (errors, workload-manager, Codex Worker).
 	TransportMTLSWhenClustered
 	// TransportSplit: nvpair-cluster-manager's :14321 — a plain PIN-authenticated
 	// pairing channel plus mTLS trusted endpoints on one port, demuxed by the
@@ -128,7 +132,7 @@ const (
 // Transport returns the static transport policy for the service.
 func (s ServiceKey) Transport() Transport {
 	switch s {
-	case ServiceErrors, ServiceWorkload, ServiceEngineControl:
+	case ServiceErrors, ServiceWorkload, ServiceEngineControl, ServiceCodexWorker:
 		return TransportMTLSWhenClustered
 	case ServiceCluster:
 		return TransportSplit
@@ -139,8 +143,9 @@ func (s ServiceKey) Transport() Transport {
 
 // UsesMTLS reports whether a consumer should dial this service over cluster
 // mTLS, given whether the target node is clustered. node-info is deliberately
-// plain even on a clustered node; errors/workload gate on the target's cluster
-// state; the cluster-manager split channel's trusted plane is mTLS.
+// plain even on a clustered node; errors/workload/Codex Worker gate on the
+// target's cluster state; the cluster-manager split channel's trusted plane is
+// mTLS.
 func (s ServiceKey) UsesMTLS(targetClustered bool) bool {
 	switch s.Transport() {
 	case TransportPlain:

@@ -25,6 +25,9 @@ func TestMain(m *testing.M) {
 
 func runFakeAppServer() int {
 	logPath := os.Getenv("CODEX_FAKE_LOG")
+	if logPath == "" {
+		logPath = os.DevNull
+	}
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return 2
@@ -45,14 +48,18 @@ func runFakeAppServer() int {
 			_, _ = fmt.Fprintln(logFile, method)
 		}
 		if method == "initialize" {
-			_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(message["id"]), "result": map[string]any{}})
+			result := map[string]any{}
+			if os.Getenv("CODEX_FAKE_UNSUPPORTED") != "1" {
+				result = map[string]any{"userAgent": "Codex CLI/fixture", "platformFamily": "unix", "platformOs": "test"}
+			}
+			_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(message["id"]), "result": result})
 			continue
 		}
 		if method == "initialized" {
 			initialized = true
 			continue
 		}
-		if method == "thread/start" {
+		if method == "thread/start" || method == "thread/resume" {
 			if os.Getenv("CODEX_FAKE_STRICT_HANDSHAKE") == "1" && !initialized {
 				_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(message["id"]), "error": map[string]any{"code": -32000, "message": "initialized notification required"}})
 				continue
@@ -63,6 +70,11 @@ func runFakeAppServer() int {
 		}
 		if method == "turn/start" {
 			_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(message["id"]), "result": map[string]any{"turn": map[string]string{"id": "turn-1"}}})
+			if os.Getenv("CODEX_FAKE_HOLD") == "1" {
+				for {
+					time.Sleep(time.Hour)
+				}
+			}
 			if os.Getenv("CODEX_FAKE_APPROVAL") == "1" {
 				_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": 99, "method": "item/commandExecution/requestApproval", "params": map[string]string{"itemId": "item-1"}})
 				if scanner.Scan() {
@@ -165,6 +177,41 @@ func TestAppServerAdapterBlocksApprovalRequests(t *testing.T) {
 	}
 	if strings.Contains(readFixtureLog(t, logPath), "approved") {
 		t.Fatalf("approval fixture log contains approval material")
+	}
+}
+
+func TestAppServerAdapterRejectsUnsupportedInitializeResponse(t *testing.T) {
+	logPath := t.TempDir() + "/unsupported.log"
+	t.Setenv("CODEX_FAKE_APP_SERVER", "1")
+	t.Setenv("CODEX_FAKE_UNSUPPORTED", "1")
+	t.Setenv("CODEX_FAKE_LOG", logPath)
+	_, err := NewAppServerFactory(buildFakeAppServer(t)).New().Run(context.Background(), validTaskRequest("r-unsupported", "t-unsupported", "a-unsupported", 1), func(codexprotocol.TaskEvent) {})
+	if err == nil || !strings.Contains(err.Error(), "unsupported app-server") {
+		t.Fatalf("expected fail-closed compatibility error, got %v", err)
+	}
+}
+
+func TestAppServerAdapterResumesPersistedThreadForFollowUp(t *testing.T) {
+	t.Setenv("CODEX_FAKE_APP_SERVER", "1")
+	factory := NewAppServerFactory(buildFakeAppServer(t))
+	session := factory.New()
+	request := validTaskRequest("r-follow-1", "t-follow", "a-follow", 1)
+	var threadID string
+	if _, err := session.RunWithChildAndThread(context.Background(), request, func(codexprotocol.TaskEvent) {}, nil, func(id string) error {
+		threadID = id
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if threadID == "" {
+		t.Fatal("first turn did not publish a thread id")
+	}
+	followUp := request
+	followUp.RequestID = "r-follow-2"
+	followUp.Context.Objective = "follow up"
+	handoff, err := session.RunFollowUpWithChild(context.Background(), followUp, threadID, func(codexprotocol.TaskEvent) {}, nil)
+	if err != nil || handoff.Status != codexprotocol.StateCompleted {
+		t.Fatalf("follow-up handoff=%+v err=%v", handoff, err)
 	}
 }
 

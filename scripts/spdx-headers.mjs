@@ -93,6 +93,7 @@ const STYLE_BY_EXTENSION = new Map([
     // NSIS accepts `#` line comments in both installer scripts and includes.
     ['.nsi', HASH],
     ['.nsh', HASH],
+    ['.service', HASH],
     ['.bat', BATCH],
     ['.cmd', BATCH],
     ['.md', MARKDOWN],

@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[Unit]
+Description=NVIDIA PAIR Codex Worker Gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Replace the executable, workspace, and cluster paths for this host.
+ExecStart=/path/to/NVIDIA-Personal-AI-Router/bin/nvpair-codex-worker --workspace-root /path/to/workspace --listen 0.0.0.0:14324 --cluster-dir /path/to/pair-cluster --supervisor-allowlist MAIN_SUPERVISOR_PRINCIPAL
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

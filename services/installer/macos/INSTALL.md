@@ -21,6 +21,10 @@ cd NVIDIA-Personal-AI-Router-<version>
 You should end up with a top-level directory containing `bin/` (the worker
 binaries) and this `INSTALL.md`.
 
+The bundle includes `nvpair-codex-worker` and `nvpair-codex-supervisor` in
+addition to the PAIR services. The Worker is started on a machine that owns a
+workspace; the Supervisor is started only on the Main Codex machine.
+
 ## 2. Run
 
 The bundled UI normally launches the broker from the same installation
@@ -35,6 +39,35 @@ Unix socket via `--ipc`):
 
 The bundled UI connects to the broker over this contract. Other clients can use
 the same API; see the `nvpair-ui-broker` README for its JSON-RPC surface.
+
+### Native Codex Worker
+
+For a local Worker/Supervisor pair:
+
+```bash
+WORKER_TOKEN="$(openssl rand -hex 32)"
+./bin/nvpair-codex-worker --workspace-root "$PWD" --listen 127.0.0.1:14324 --auth-token "$WORKER_TOKEN"
+./bin/nvpair-codex-supervisor --worker-url http://127.0.0.1:14324 --worker-token "$WORKER_TOKEN"
+```
+
+For a paired remote Worker, configure the PAIR cluster directory and allow the
+Main Supervisor's certificate principal:
+
+```bash
+./bin/nvpair-codex-worker --workspace-root /Users/me/project \
+  --listen 0.0.0.0:14324 --cluster-dir "$PAIR_CLUSTER_DIR" \
+  --supervisor-allowlist "$MAIN_SUPERVISOR_PRINCIPAL"
+```
+
+The Supervisor remains a local stdio MCP process and consumes the PAIR
+`discovery:nodes` snapshot with `--discovery-file`, or a controlled explicit
+`--worker-endpoints` list. macOS's built-in mDNS responder is sufficient; allow
+TCP 14324 only on the trusted local network when using remote Workers.
+
+For launch-at-login, copy the bundled `com.nvidia.nvpair.codex-worker.plist`
+template, replace its
+workspace and cluster paths, and load it with `launchctl`. Keep the Supervisor
+under Main Codex's local MCP process manager so its stdio stays attached.
 
 ## 3. Uninstall
 

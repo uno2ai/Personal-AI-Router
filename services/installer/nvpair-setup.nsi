@@ -118,6 +118,8 @@ FunctionEnd
   nsExec::ExecToLog 'taskkill /F /IM "nvpair-node-settings.exe"'
   nsExec::ExecToLog 'taskkill /F /IM "nvpair-cluster-manager.exe"'
   nsExec::ExecToLog 'taskkill /F /IM "nvpair-job-scheduler.exe"'
+  nsExec::ExecToLog 'taskkill /F /IM "nvpair-codex-worker.exe"'
+  nsExec::ExecToLog 'taskkill /F /IM "nvpair-codex-supervisor.exe"'
   nsExec::ExecToLog 'taskkill /F /IM "nvpair-ui-broker.exe"'
   nsExec::ExecToLog 'taskkill /F /IM "nvpair-tui.exe"'
   ; Give Windows a moment to release the handles.
@@ -180,6 +182,10 @@ Section "Install"
   ; nvpair-job-scheduler is pure stdio (no listening port, no mDNS), so it needs no
   ; firewall rule — it runs under nvpair-ui-broker and only ranks nodes for the proxies.
   File "..\build\bin\nvpair-job-scheduler.exe"
+  ; The Codex Worker is the optional dedicated mTLS task endpoint. The
+  ; Supervisor remains local stdio-only; it never receives a LAN firewall rule.
+  File "..\build\bin\nvpair-codex-worker.exe"
+  File "..\build\bin\nvpair-codex-supervisor.exe"
   ; nvpair-ui-broker is the primary entry point: it talks JSON-RPC over stdio / a
   ; named pipe only, so it needs no inbound firewall rule. The graphical UI
   ; bundled alongside this backend launches it to drive the NVPAIR API, and it
@@ -232,6 +238,7 @@ Section "Install"
 
   nsExec::ExecToLog 'netsh advfirewall firewall add rule name="NVPAIR Node Info" dir=in action=allow program="$INSTDIR\bin\nvpair-node-info.exe" enable=yes profile=any remoteip=localsubnet'
   nsExec::ExecToLog 'netsh advfirewall firewall add rule name="NVPAIR Node Scanner" dir=in action=allow program="$INSTDIR\bin\nvpair-node-scanner.exe" enable=yes profile=any remoteip=localsubnet'
+  nsExec::ExecToLog 'netsh advfirewall firewall add rule name="NVPAIR Codex Worker (mTLS 14324)" dir=in action=allow protocol=TCP localport=14324 program="$INSTDIR\bin\nvpair-codex-worker.exe" enable=yes profile=any remoteip=localsubnet'
 
   ; mDNS needs UDP 5353 inbound
   nsExec::ExecToLog 'netsh advfirewall firewall add rule name="NVPAIR mDNS (UDP 5353)" dir=in action=allow protocol=UDP localport=5353 program="$INSTDIR\bin\ollama-proxy.exe" enable=yes profile=any remoteip=localsubnet'
@@ -272,6 +279,7 @@ Section "Uninstall"
 
   ; Remove firewall exceptions
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="NVPAIR Ollama Proxy"'
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="NVPAIR LM Studio Proxy"'
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="NVPAIR Node Info"'
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="NVPAIR mDNS (UDP 5353)"'
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="NVPAIR Node Scanner"'
@@ -286,6 +294,7 @@ Section "Uninstall"
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="NVPAIR mDNS Cluster Manager (UDP 5353)"'
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="NVPAIR Engine Manager (TCP 14322)"'
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="NVPAIR Engine Manager Control (TCP 14323)"'
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="NVPAIR Codex Worker (mTLS 14324)"'
 
   ; Remove files
   Delete "$INSTDIR\bin\ollama-proxy.exe"
@@ -301,6 +310,8 @@ Section "Uninstall"
   Delete "$INSTDIR\bin\nvpair-job-scheduler.exe"
   Delete "$INSTDIR\bin\nvpair-ui-broker.exe"
   Delete "$INSTDIR\bin\nvpair-tui.exe"
+  Delete "$INSTDIR\bin\nvpair-codex-worker.exe"
+  Delete "$INSTDIR\bin\nvpair-codex-supervisor.exe"
   RMDir  "$INSTDIR\bin"
   Delete "$INSTDIR\EULA.txt"
   Delete "$INSTDIR\uninstall.exe"

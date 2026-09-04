@@ -7,6 +7,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
@@ -38,6 +40,10 @@ func (fakeWorkerClient) Cancel(context.Context, codexprotocol.Mutation) (json.Ra
 	return json.RawMessage(`{"taskId":"task-1","state":"cancelling"}`), nil
 }
 
+func (fakeWorkerClient) Artifact(context.Context, string, string) ([]byte, error) {
+	return []byte("artifact"), nil
+}
+
 func (leakyWorkerClient) Worker(context.Context) (json.RawMessage, error) {
 	return json.RawMessage(`{"protocolVersion":1,"version":"test","capabilities":{"os":"darwin","architecture":"arm64","maxConcurrency":1},"prompt":"secret"}`), nil
 }
@@ -52,6 +58,10 @@ func (leakyWorkerClient) Result(context.Context, string) (json.RawMessage, error
 }
 func (leakyWorkerClient) Cancel(context.Context, codexprotocol.Mutation) (json.RawMessage, error) {
 	return json.RawMessage(`{"taskId":"task-1","state":"cancelling","source":"secret"}`), nil
+}
+
+func (leakyWorkerClient) Artifact(context.Context, string, string) ([]byte, error) {
+	return []byte("secret"), nil
 }
 
 func callMCP(t *testing.T, server *MCPServer, request string) json.RawMessage {
@@ -172,5 +182,24 @@ func TestStatusAndResultCannotCrossRequestedTaskBoundary(t *testing.T) {
 	}
 	if !taskResult.IsError {
 		t.Fatal("result response for a different task was accepted")
+	}
+}
+
+func TestHTTPWorkerClientAllowsBoundedArtifactPayloads(t *testing.T) {
+	data := bytes.Repeat([]byte("a"), codexprotocol.MaxHandoffBytes+1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(data)
+	}))
+	defer server.Close()
+	client, err := NewHTTPWorkerClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := client.Artifact(context.Background(), "task-1", "artifact-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(data) {
+		t.Fatalf("artifact length=%d, want %d", len(got), len(data))
 	}
 }

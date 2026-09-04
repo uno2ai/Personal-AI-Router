@@ -150,6 +150,36 @@ func TestTaskIDCannotBeReusedUntilExplicitlyFenced(t *testing.T) {
 	}
 }
 
+func TestLostAttemptCannotResumeUntilExplicitlyFenced(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "tasks.jsonl")
+	request := validTaskRequest("lost-request", "lost-task", "lost-attempt", 1)
+	first := mustOpenStore(t, path)
+	if _, _, err := first.Accept(request); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	second := mustOpenStore(t, path)
+	reconciled, ok := second.Get(request.TaskID)
+	if !ok || reconciled.State != codexprotocol.StateLost || reconciled.Fenced {
+		t.Fatalf("restart did not preserve unresolved lost attempt: %+v", reconciled)
+	}
+	if _, err := second.PrepareFollowUp(reconciled.Mutation); !errors.Is(err, ErrTaskBusy) {
+		t.Fatalf("lost attempt was resumable before fencing: %v", err)
+	}
+	fence := reconciled.Mutation
+	fence.RequestID = "lost-fence"
+	if err := second.FenceAndRelease(fence); err != nil {
+		t.Fatal(err)
+	}
+	retry := validTaskRequest("lost-retry", request.TaskID, "new-attempt", reconciled.LeaseEpoch+1)
+	if _, duplicate, err := second.AcceptAt(retry, root, 1); err != nil || duplicate {
+		t.Fatalf("explicitly fenced attempt was not replaceable: duplicate=%v err=%v", duplicate, err)
+	}
+}
+
 func TestEventSequenceAndMetadataSurviveReplay(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "tasks.jsonl")
