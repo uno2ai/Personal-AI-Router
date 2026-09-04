@@ -1,0 +1,141 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package main
+
+import (
+	"bufio"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"sync"
+
+	"nvpair-shared/codexprotocol"
+)
+
+const journalVersion = 1
+
+type journalEntry struct {
+	Version     int                      `json:"version"`
+	Sequence    uint64                   `json:"sequence"`
+	Kind        string                   `json:"kind"`
+	RequestID   string                   `json:"requestId"`
+	RequestHash string                   `json:"requestHash,omitempty"`
+	Record      codexprotocol.TaskRecord `json:"record"`
+	Event       *codexprotocol.TaskEvent `json:"event,omitempty"`
+}
+
+type Journal struct {
+	mu       sync.Mutex
+	file     *os.File
+	path     string
+	sequence uint64
+	closed   bool
+}
+
+func NewJournal(path string) (*Journal, error) {
+	if path == "" {
+		return nil, errors.New("journal path is required")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, fmt.Errorf("create journal directory: %w", err)
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open journal: %w", err)
+	}
+	entries, err := readJournal(path)
+	if err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	var sequence uint64
+	for _, entry := range entries {
+		if entry.Sequence > sequence {
+			sequence = entry.Sequence
+		}
+	}
+	return &Journal{file: file, path: path, sequence: sequence}, nil
+}
+
+func (j *Journal) Append(entry journalEntry) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.closed {
+		return errors.New("journal is closed")
+	}
+	if entry.Version == 0 {
+		entry.Version = journalVersion
+	}
+	if entry.Version != journalVersion {
+		return fmt.Errorf("unsupported journal version %d", entry.Version)
+	}
+	j.sequence++
+	entry.Sequence = j.sequence
+	encoded, err := json.Marshal(entry)
+	if err != nil {
+		return fmt.Errorf("encode journal entry: %w", err)
+	}
+	encoded = append(encoded, '\n')
+	if _, err := j.file.Write(encoded); err != nil {
+		return fmt.Errorf("write journal: %w", err)
+	}
+	if err := j.file.Sync(); err != nil {
+		return fmt.Errorf("sync journal: %w", err)
+	}
+	return nil
+}
+
+func (j *Journal) Replay() ([]journalEntry, error) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return readJournal(j.path)
+}
+
+func (j *Journal) Close() error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.closed {
+		return nil
+	}
+	j.closed = true
+	if err := j.file.Sync(); err != nil {
+		_ = j.file.Close()
+		return err
+	}
+	return j.file.Close()
+}
+
+func readJournal(path string) ([]journalEntry, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("read journal: %w", err)
+	}
+	defer file.Close()
+
+	var entries []journalEntry
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
+	var previous uint64
+	for scanner.Scan() {
+		var entry journalEntry
+		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
+			return nil, fmt.Errorf("decode journal entry: %w", err)
+		}
+		if entry.Version != journalVersion {
+			return nil, fmt.Errorf("unsupported journal version %d", entry.Version)
+		}
+		if entry.Sequence == 0 || entry.Sequence <= previous {
+			return nil, fmt.Errorf("journal sequence %d is not greater than %d", entry.Sequence, previous)
+		}
+		previous = entry.Sequence
+		entries = append(entries, entry)
+	}
+	if err := scanner.Err(); err != nil && !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("scan journal: %w", err)
+	}
+	return entries, nil
+}
