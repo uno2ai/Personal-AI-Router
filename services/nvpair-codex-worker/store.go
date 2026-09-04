@@ -31,6 +31,7 @@ type TaskStore struct {
 	events           map[string][]codexprotocol.TaskEvent
 	requestHashes    map[string]string
 	requestTasks     map[string]string
+	requestRecords   map[string]codexprotocol.TaskRecord
 	appliedMutations map[string]bool
 	workspaceLeases  map[string]string
 }
@@ -45,6 +46,7 @@ func NewTaskStore(journal *Journal) (*TaskStore, error) {
 		events:           make(map[string][]codexprotocol.TaskEvent),
 		requestHashes:    make(map[string]string),
 		requestTasks:     make(map[string]string),
+		requestRecords:   make(map[string]codexprotocol.TaskRecord),
 		appliedMutations: make(map[string]bool),
 		workspaceLeases:  make(map[string]string),
 	}
@@ -76,7 +78,7 @@ func (s *TaskStore) Accept(request codexprotocol.TaskRequest) (codexprotocol.Tas
 		if previousHash != hashString {
 			return codexprotocol.TaskRecord{}, false, ErrRequestConflict
 		}
-		return s.records[s.requestTasks[request.RequestID]], true, nil
+		return s.requestRecords[request.RequestID], true, nil
 	}
 	if owner, exists := s.workspaceLeases[workspaceKey]; exists && owner != request.TaskID {
 		return codexprotocol.TaskRecord{}, false, ErrWorkspaceBusy
@@ -193,6 +195,7 @@ func (s *TaskStore) apply(entry journalEntry) {
 		s.records[entry.Record.TaskID] = entry.Record
 		s.requestHashes[entry.RequestID] = entry.RequestHash
 		s.requestTasks[entry.RequestID] = entry.Record.TaskID
+		s.requestRecords[entry.RequestID] = entry.Record
 		if !entry.Record.State.Terminal() {
 			s.workspaceLeases[entry.Record.WorkspaceKey] = entry.Record.TaskID
 		}
