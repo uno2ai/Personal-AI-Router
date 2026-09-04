@@ -87,7 +87,10 @@ func (s *TaskStore) Accept(request codexprotocol.TaskRequest) (codexprotocol.Tas
 		if !previous.State.Terminal() {
 			return codexprotocol.TaskRecord{}, false, ErrTaskBusy
 		}
-		if request.LeaseEpoch <= previous.LeaseEpoch {
+		if !previous.Fenced {
+			return codexprotocol.TaskRecord{}, false, ErrTaskBusy
+		}
+		if request.LeaseEpoch < previous.LeaseEpoch {
 			return codexprotocol.TaskRecord{}, false, ErrStaleLease
 		}
 	}
@@ -179,11 +182,40 @@ func (s *TaskStore) Mutate(mutation codexprotocol.Mutation, change func(*codexpr
 }
 
 func (s *TaskStore) FenceAndRelease(mutation codexprotocol.Mutation) error {
-	return s.Mutate(mutation, func(record *codexprotocol.TaskRecord) error {
-		record.LeaseEpoch++
-		record.State = codexprotocol.StateLost
+	if err := mutation.Validate(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, exists := s.records[mutation.TaskID]
+	if !exists {
+		return ErrTaskNotFound
+	}
+	if record.AttemptID != mutation.AttemptID || record.LeaseEpoch != mutation.LeaseEpoch {
+		return ErrStaleLease
+	}
+	if record.Fenced {
 		return nil
-	})
+	}
+	record.LeaseEpoch++
+	record.State = codexprotocol.StateLost
+	record.Fenced = true
+	record.UpdatedAt = time.Now().UTC()
+	event := codexprotocol.TaskEvent{
+		TaskID:     record.TaskID,
+		AttemptID:  record.AttemptID,
+		LeaseEpoch: record.LeaseEpoch,
+		Seq:        record.LastEventSeq + 1,
+		State:      record.State,
+		Kind:       "lease_fenced",
+		At:         record.UpdatedAt,
+	}
+	entry := journalEntry{Kind: "fence", RequestID: mutation.RequestID, Record: record, Event: &event}
+	if err := s.journal.Append(entry); err != nil {
+		return err
+	}
+	s.apply(entry)
+	return nil
 }
 
 func (s *TaskStore) Close() error {
@@ -199,6 +231,15 @@ func (s *TaskStore) apply(entry journalEntry) {
 		if !entry.Record.State.Terminal() {
 			s.workspaceLeases[entry.Record.WorkspaceKey] = entry.Record.TaskID
 		}
+		return
+	}
+	if entry.Kind == "fence" {
+		s.records[entry.Record.TaskID] = entry.Record
+		s.appliedMutations[entry.RequestID] = true
+		if entry.Event != nil {
+			s.events[entry.Record.TaskID] = append(s.events[entry.Record.TaskID], *entry.Event)
+		}
+		delete(s.workspaceLeases, entry.Record.WorkspaceKey)
 		return
 	}
 	if entry.Kind != "mutate" {

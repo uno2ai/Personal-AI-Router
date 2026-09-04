@@ -112,3 +112,38 @@ func TestWorkspaceLeaseBlocksSecondTaskAcrossSupervisors(t *testing.T) {
 		t.Fatalf("expected workspace lease conflict, got %v", err)
 	}
 }
+
+func TestTaskIDCannotBeReusedUntilExplicitlyFenced(t *testing.T) {
+	store := newTestStore(t)
+	request := validTaskRequest("r1", "t1", "a1", 1)
+	if _, _, err := store.Accept(request); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Mutate(codexprotocol.Mutation{
+		ProtocolVersion: codexprotocol.ProtocolVersion,
+		RequestID:       "finish-1",
+		TaskID:          "t1",
+		AttemptID:       "a1",
+		LeaseEpoch:      1,
+	}, func(record *codexprotocol.TaskRecord) error {
+		record.State = codexprotocol.StateFailed
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.Accept(validTaskRequest("r2", "t1", "a2", 2)); !errors.Is(err, ErrTaskBusy) {
+		t.Fatalf("expected explicit-fence conflict, got %v", err)
+	}
+	if err := store.FenceAndRelease(codexprotocol.Mutation{
+		ProtocolVersion: codexprotocol.ProtocolVersion,
+		RequestID:       "fence-1",
+		TaskID:          "t1",
+		AttemptID:       "a1",
+		LeaseEpoch:      1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, duplicate, err := store.Accept(validTaskRequest("r2", "t1", "a2", 2)); err != nil || duplicate {
+		t.Fatalf("expected fenced retry, duplicate=%v err=%v", duplicate, err)
+	}
+}

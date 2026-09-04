@@ -226,6 +226,7 @@ type TaskRecord struct {
 	LastEventSeq        uint64    `json:"lastEventSeq"`
 	UpdatedAt           time.Time `json:"updatedAt"`
 	Handoff             *Handoff  `json:"handoff,omitempty"`
+	Fenced              bool      `json:"fenced"`
 }
 
 type TaskEvent struct {

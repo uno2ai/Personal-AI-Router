@@ -31,6 +31,9 @@ var (
 	manualNodesBin   string
 	clusterMgrBin    string
 	schedulerBin     string
+	workerBin        string
+	supervisorBin    string
+	fakeCodexBin     string
 )
 
 func TestMain(m *testing.M) {
@@ -56,6 +59,9 @@ func TestMain(m *testing.M) {
 	manualNodesBin = filepath.Join(tmpDir, "nvpair-manual-nodes"+ext)
 	clusterMgrBin = filepath.Join(tmpDir, "nvpair-cluster-manager"+ext)
 	schedulerBin = filepath.Join(tmpDir, "nvpair-job-scheduler"+ext)
+	workerBin = filepath.Join(tmpDir, "nvpair-codex-worker"+ext)
+	supervisorBin = filepath.Join(tmpDir, "nvpair-codex-supervisor"+ext)
+	fakeCodexBin = filepath.Join(tmpDir, "fake-codex-app-server"+ext)
 
 	log.Println("building ollama-proxy...")
 	if err := goBuild(filepath.Join("..", "ollama-proxy"), proxyBin); err != nil {
@@ -141,6 +147,24 @@ func TestMain(m *testing.M) {
 	if err := goBuild(filepath.Join("..", "nvpair-job-scheduler"), schedulerBin); err != nil {
 		os.RemoveAll(tmpDir)
 		log.Fatalf("build nvpair-job-scheduler: %v", err)
+	}
+
+	log.Println("building nvpair-codex-worker...")
+	if err := goBuild(filepath.Join("..", "nvpair-codex-worker"), workerBin); err != nil {
+		os.RemoveAll(tmpDir)
+		log.Fatalf("build nvpair-codex-worker: %v", err)
+	}
+
+	log.Println("building nvpair-codex-supervisor...")
+	if err := goBuild(filepath.Join("..", "nvpair-codex-supervisor"), supervisorBin); err != nil {
+		os.RemoveAll(tmpDir)
+		log.Fatalf("build nvpair-codex-supervisor: %v", err)
+	}
+
+	log.Println("building fake Codex app-server...")
+	if err := goBuild(filepath.Join("testdata", "fake-codex-app-server"), fakeCodexBin); err != nil {
+		os.RemoveAll(tmpDir)
+		log.Fatalf("build fake Codex app-server: %v", err)
 	}
 
 	code := m.Run()
