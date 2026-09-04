@@ -136,9 +136,12 @@ Worker capability selection therefore belongs to the Supervisor.
 
 ## 5. Supervisor Protocol v1
 
-Supervisor Protocol v1 is JSON over HTTPS on a dedicated mTLS-only Worker
-endpoint. The default port is `14324`, advertised in the existing PAIR node
-record as `cw=14324` (Codex Worker). It never tunnels raw app-server methods.
+The target Supervisor Protocol is JSON over a dedicated mTLS-only Worker
+endpoint. The Phase 1 vertical slice deliberately uses a literal-loopback
+HTTP endpoint with a required bearer token; it is not reachable from the LAN
+and is not the remote mTLS transport. The target default port is `14324`,
+advertised in the existing PAIR node record as `cw=14324` (Codex Worker) only
+in the later discovery phase. It never tunnels raw app-server methods.
 
 | Operation | Purpose |
 | --- | --- |
@@ -182,13 +185,17 @@ through the Supervisor.
 
 The Worker Gateway performs this sequence:
 
-1. Start with a configured PAIR cluster directory, workspace allowlist,
-   Supervisor certificate allowlist, capacity, and local execution policy.
+1. Start with a configured workspace root, bearer token, capacity, and local
+   execution policy. The Phase 1 HTTP boundary also requires a loopback Host,
+   rejects browser Origin headers, and requires `application/json` for POST.
+   The PAIR cluster directory and Supervisor certificate ACL are later-phase
+   inputs for the mTLS boundary.
 2. Load and replay its durable task journal before accepting new work.
 3. Register `cw=14324` with the local PAIR broker when broker supervision is
    enabled; otherwise use the configured endpoint registry for phase one.
-4. Accept a task only after mTLS authentication, ACL validation, schema
-   validation, workspace resolution, and capacity/lease checks.
+4. Accept a task only after Phase 1 bearer authentication (or later mTLS/ACL
+   validation), schema validation, workspace resolution, and capacity/lease
+   checks.
 5. Persist the acceptance and lease record, then start one native
    `codex app-server` child for the attempt.
 6. Initialize the app-server adapter, create or resume a thread, and start a
@@ -228,14 +235,13 @@ an explicit release/fence operation.
 
 ## 7. Discovery, service registration, and mTLS
 
-`cw=14324` is added to the existing `noderec.ServiceKey` order and registered
-through the existing broker discovery path. The mDNS schema version remains
-unchanged because the existing parser already supports forward-compatible
-service keys. Older PAIR nodes ignore `cw`; a Supervisor requires the key for
-automatic Worker discovery. Fixed-port probing without a TXT service key is
-not used.
+This section is a later integration phase. Phase 1 does not advertise mDNS,
+register `cw`, or accept LAN connections. `cw=14324` will be added to the
+existing `noderec.ServiceKey` order and registered through the existing broker
+discovery path only after the mTLS endpoint is implemented. Fixed-port probing
+without a TXT service key is not used.
 
-The Supervisor treats mDNS as an address hint only:
+When enabled, the Supervisor treats mDNS as an address hint only:
 
 1. Parse the node record and collect its `hostUuid`, `clusterUuid`, `cw` port,
    and ranked IP candidates.
@@ -255,7 +261,8 @@ successful probes with a unique matching principal and current pin; until
 then the entry cannot be selected.
 
 `clustertrust.Mesh.Watch` is a polling watcher, not a push/live signal. Its
-current `RefreshInterval` is two seconds. The Worker therefore:
+current `RefreshInterval` is two seconds. In the later mTLS phase the Worker
+therefore:
 
 - calls `mesh.Refresh()` before every HTTP authorization check;
 - revalidates the authenticated peer certificate against the current pin on
@@ -263,10 +270,11 @@ current `RefreshInterval` is two seconds. The Worker therefore:
 - runs a two-second revocation poller for active tasks and cancels tasks whose
   Supervisor principal or certificate is no longer current.
 
-The revocation target is `2 * clustertrust.RefreshInterval + 1 second` under
-normal scheduling, and the integration test measures this bound. Pin removal
-or certificate rotation is not described as instantaneous. An unclustered
-Worker refuses mTLS and never falls back to plaintext.
+The planned revocation target is `2 * clustertrust.RefreshInterval + 1 second`
+under normal scheduling, and the integration test must measure this bound.
+Pin removal or certificate rotation is not instantaneous. An unclustered
+Worker refuses mTLS and never falls back to plaintext. These mTLS controls are
+not claimed by the Phase 1 loopback bearer implementation.
 
 The `nvpair-ui-broker` channel remains single-client and local. It may spawn
 the Worker and forward its service registration, but Supervisor task payloads
@@ -365,13 +373,14 @@ credentials, and large inline outputs are not returned to Main by default.
 
 ## 11. Security-critical decisions and controls
 
-### C1: revocation latency
+### C1: revocation latency (later mTLS phase)
 
 The two-second `Mesh.Watch` polling interval is documented as a bound, not as
-live push. Request authorization refreshes the mesh and checks the current
-certificate pin. Active-task revalidation cancels affected tasks within the
-defined five-second target under normal scheduling. Tests measure pin removal,
-new-request rejection, active-task cancellation, and certificate rotation.
+live push. Request authorization will refresh the mesh and check the current
+certificate pin. Active-task revalidation will cancel affected tasks within
+the defined five-second target under normal scheduling. Tests must measure pin
+removal, new-request rejection, active-task cancellation, and certificate
+rotation before this phase is enabled.
 
 ### C2: approval authenticity
 

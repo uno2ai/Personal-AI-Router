@@ -25,6 +25,7 @@ func main() {
 	stateRoot := flag.String("state-root", "", "durable Worker state directory")
 	codexBin := flag.String("codex-bin", "codex", "Codex executable")
 	maxConcurrency := flag.Int("max-concurrency", 1, "maximum number of active task leases")
+	authToken := flag.String("auth-token", "", "required bearer token for Supervisor requests")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
@@ -40,6 +41,9 @@ func main() {
 	}
 	if *maxConcurrency <= 0 {
 		log.Fatal("--max-concurrency must be positive")
+	}
+	if *authToken == "" {
+		log.Fatal("--auth-token is required")
 	}
 
 	policy, err := NewWorkspacePolicy(*workspaceRoot)
@@ -63,7 +67,7 @@ func main() {
 		log.Fatalf("task store: %v", err)
 	}
 
-	worker := NewServerWithCapacity(store, NewAppServerFactory(*codexBin), policy, *maxConcurrency).(*workerHTTPServer)
+	worker := NewServerWithCapacityAndAuth(store, NewAppServerFactory(*codexBin), policy, *maxConcurrency, *authToken).(*workerHTTPServer)
 	httpServer := &http.Server{Handler: worker}
 	listener, err := net.Listen("tcp", *listen)
 	if err != nil {

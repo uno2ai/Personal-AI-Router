@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"nvpair-shared/codexprotocol"
 )
@@ -65,7 +66,7 @@ func runFakeAppServer() int {
 			if os.Getenv("CODEX_FAKE_APPROVAL") == "1" {
 				_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": 99, "method": "item/commandExecution/requestApproval", "params": map[string]string{"itemId": "item-1"}})
 				if scanner.Scan() {
-					_, _ = fmt.Fprintln(logFile, scanner.Text())
+					_, _ = fmt.Fprintln(logFile, "approval-response")
 				}
 				return 0
 			}
@@ -164,5 +165,27 @@ func TestAppServerAdapterBlocksApprovalRequests(t *testing.T) {
 	}
 	if strings.Contains(readFixtureLog(t, logPath), "approved") {
 		t.Fatalf("approval fixture log contains approval material")
+	}
+}
+
+func TestAppServerCompletionRacingTurnStartIsCorrelatedAndReplayed(t *testing.T) {
+	state := &appServerRunState{completedCh: make(chan turnResult, 1)}
+	state.setThreadID("thread-1")
+	state.acceptDelta(pendingDelta{threadID: "thread-1", turnID: "turn-1", delta: `{"version":1}`})
+	if result := state.acceptCompletion(turnCompletion{threadID: "thread-1", turnID: "turn-1", status: "completed"}); result != nil {
+		t.Fatal("completion was delivered before the expected turn id was known")
+	}
+	if result := state.setTurnIDAndFlush("turn-1"); result == nil {
+		t.Fatal("queued completion was not released after turn correlation")
+	} else {
+		state.deliverCompletion(*result)
+	}
+	select {
+	case result := <-state.completedCh:
+		if result.message != `{"version":1}` {
+			t.Fatalf("message=%q", result.message)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for correlated completion")
 	}
 }

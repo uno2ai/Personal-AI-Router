@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"sort"
 	"sync"
 	"time"
@@ -339,7 +338,7 @@ func hashMutation(mutation codexprotocol.Mutation) string {
 }
 
 func workspaceLeaseKey(canonicalPath string) string {
-	hash := sha256.Sum256([]byte(filepath.Clean(canonicalPath)))
+	hash := sha256.Sum256([]byte(canonicalWorkspaceIdentity(canonicalPath)))
 	return "workspace:" + hex.EncodeToString(hash[:])
 }
 

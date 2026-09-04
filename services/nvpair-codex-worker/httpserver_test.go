@@ -112,3 +112,55 @@ func TestEventStreamReturnsOnlyEventsAfterSequence(t *testing.T) {
 		t.Fatalf("events response: status=%d content-type=%q", get.StatusCode, get.Header.Get("Content-Type"))
 	}
 }
+
+func TestAuthenticatedWorkerRejectsMissingTokenOriginAndNonJSONPosts(t *testing.T) {
+	root := t.TempDir()
+	policy, err := NewWorkspacePolicy(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewTaskStore(mustJournal(root + "/tasks.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	handler := NewServerWithCapacityAndAuth(store, NewAppServerFactory(mustExecutable(t)), policy, 1, "worker-secret")
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	request, err := http.NewRequest(http.MethodGet, server.URL+"/v1/worker", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("missing token status=%d", response.StatusCode)
+	}
+
+	request, _ = http.NewRequest(http.MethodGet, server.URL+"/v1/worker", nil)
+	request.Header.Set("Authorization", "Bearer worker-secret")
+	request.Header.Set("Origin", "https://example.invalid")
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("browser origin status=%d", response.StatusCode)
+	}
+
+	request, _ = http.NewRequest(http.MethodPost, server.URL+"/v1/tasks", bytes.NewReader(mustJSONBytes(t, validTaskRequest("r-auth", "t-auth", "a-auth", 1))))
+	request.Header.Set("Authorization", "Bearer worker-secret")
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusUnsupportedMediaType {
+		t.Fatalf("non-JSON post status=%d", response.StatusCode)
+	}
+}

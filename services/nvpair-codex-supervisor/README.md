@@ -16,9 +16,14 @@ Start the Worker with an explicit workspace root, then point the Supervisor at
 the Worker URL printed by its startup log:
 
 ```bash
-./nvpair-codex-worker --workspace-root "$PWD" --listen 127.0.0.1:14324
-./nvpair-codex-supervisor --worker-url http://127.0.0.1:14324
+WORKER_TOKEN="$(openssl rand -hex 32)"
+./nvpair-codex-worker --workspace-root "$PWD" --listen 127.0.0.1:14324 --auth-token "$WORKER_TOKEN"
+./nvpair-codex-supervisor --worker-url http://127.0.0.1:14324 --worker-token "$WORKER_TOKEN"
 ```
+
+Phase 1 uses a loopback-only HTTP connection with a required bearer token;
+the token is a local process secret and must not be logged or exposed to a
+remote host.
 
 Configure the resulting Supervisor executable as a local stdio MCP server for
 the Main Codex process. The MCP surface contains `workers.list`,

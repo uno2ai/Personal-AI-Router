@@ -14,6 +14,7 @@ var Version = "dev"
 
 func main() {
 	workerURL := flag.String("worker-url", "", "required loopback Worker HTTP URL")
+	workerToken := flag.String("worker-token", "", "required bearer token for the Worker")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 	if *showVersion {
@@ -23,7 +24,10 @@ func main() {
 	if *workerURL == "" {
 		log.Fatal("--worker-url is required")
 	}
-	client, err := NewHTTPWorkerClient(*workerURL)
+	if *workerToken == "" {
+		log.Fatal("--worker-token is required")
+	}
+	client, err := NewHTTPWorkerClient(*workerURL, *workerToken)
 	if err != nil {
 		log.Fatal(err)
 	}

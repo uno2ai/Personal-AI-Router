@@ -11,7 +11,9 @@ import (
 	"syscall"
 )
 
-func acquireJournalLock(path string) (*os.File, error) {
+type journalLockHandle struct{ file *os.File }
+
+func acquireJournalLock(path string) (*journalLockHandle, error) {
 	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open journal lock: %w", err)
@@ -20,10 +22,14 @@ func acquireJournalLock(path string) (*os.File, error) {
 		_ = lock.Close()
 		return nil, fmt.Errorf("journal is already open: %w", err)
 	}
-	return lock, nil
+	return &journalLockHandle{file: lock}, nil
 }
 
-func releaseJournalLock(lock *os.File) error {
+func releaseJournalLock(handle *journalLockHandle) error {
+	if handle == nil {
+		return nil
+	}
+	lock := handle.file
 	if lock == nil {
 		return nil
 	}

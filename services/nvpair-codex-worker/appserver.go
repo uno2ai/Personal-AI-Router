@@ -82,28 +82,39 @@ func (s *AppServerSession) RunWithChild(ctx context.Context, request codexprotoc
 	}()
 
 	cmd := exec.Command(s.binary, "app-server", "--listen", "stdio://")
-	cmd.Dir = cwd
+	cleanupChild, verifyChild, err := prepareChildProcess(cmd, cwd)
+	if err != nil {
+		return codexprotocol.Handoff{}, err
+	}
 	cmd.Stderr = io.Discard
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
+		cleanupChild()
 		return codexprotocol.Handoff{}, fmt.Errorf("open app-server stdin: %w", err)
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		_ = stdin.Close()
+		cleanupChild()
 		return codexprotocol.Handoff{}, fmt.Errorf("open app-server stdout: %w", err)
 	}
 	if err := cmd.Start(); err != nil {
 		_ = stdin.Close()
+		cleanupChild()
 		return codexprotocol.Handoff{}, fmt.Errorf("start app-server: %w", err)
 	}
+	if err := verifyChild(); err != nil {
+		_ = terminateAndWait(cmd)
+		cleanupChild()
+		return codexprotocol.Handoff{}, fmt.Errorf("verify app-server working directory: %w", err)
+	}
+	cleanupChild()
 	s.mu.Lock()
 	s.process = cmd.Process
 	s.mu.Unlock()
 	if onChild != nil {
 		if err := onChild(fmt.Sprintf("pid:%d", cmd.Process.Pid)); err != nil {
-			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
+			_ = terminateAndWait(cmd)
 			return codexprotocol.Handoff{}, fmt.Errorf("persist app-server child identity: %w", err)
 		}
 	}
@@ -174,11 +185,15 @@ func (s *AppServerSession) RunWithChild(ctx context.Context, request codexprotoc
 	if err := json.Unmarshal(turnResult, &turn); err != nil || turn.Turn.ID == "" {
 		return s.failedProcess(cmd, stdin, peer, waitCh, serveDone, errors.New("app-server turn/start returned no turn id"))
 	}
-	state.setTurnID(turn.Turn.ID)
+	if pending := state.setTurnIDAndFlush(turn.Turn.ID); pending != nil {
+		state.deliverCompletion(*pending)
+	}
 
 	select {
 	case completed := <-state.completedCh:
-		s.closeProcess(cmd, stdin, peer, serveDone, waitCh)
+		if err := s.closeProcess(cmd, stdin, peer, serveDone, waitCh); err != nil {
+			return codexprotocol.Handoff{}, err
+		}
 		if completed.err != nil {
 			return codexprotocol.Handoff{}, completed.err
 		}
@@ -191,7 +206,9 @@ func (s *AppServerSession) RunWithChild(ctx context.Context, request codexprotoc
 		}
 		return handoff, nil
 	case <-approvalCh:
-		s.closeProcess(cmd, stdin, peer, serveDone, waitCh)
+		if err := s.closeProcess(cmd, stdin, peer, serveDone, waitCh); err != nil {
+			return codexprotocol.Handoff{}, err
+		}
 		return codexprotocol.Handoff{
 			Version:   codexprotocol.HandoffVersion,
 			TaskID:    request.TaskID,
@@ -200,14 +217,17 @@ func (s *AppServerSession) RunWithChild(ctx context.Context, request codexprotoc
 			Summary:   "approval_required",
 		}, nil
 	case <-ctx.Done():
-		s.interruptAndClose(ctx.Err(), cmd, stdin, peer, serveDone, waitCh, thread.Thread.ID, turn.Turn.ID)
-		return codexprotocol.Handoff{}, ctx.Err()
+		return codexprotocol.Handoff{}, s.interruptAndClose(ctx.Err(), cmd, stdin, peer, serveDone, waitCh, thread.Thread.ID, turn.Turn.ID)
 	case <-cancelRequest:
-		s.interruptAndClose(context.Canceled, cmd, stdin, peer, serveDone, waitCh, thread.Thread.ID, turn.Turn.ID)
-		return codexprotocol.Handoff{}, context.Canceled
+		return codexprotocol.Handoff{}, s.interruptAndClose(context.Canceled, cmd, stdin, peer, serveDone, waitCh, thread.Thread.ID, turn.Turn.ID)
 	case err := <-waitCh:
+		terminationErr := terminateChild(cmd)
 		peer.Close()
 		<-serveDone
+		releaseChildProcess(cmd)
+		if terminationErr != nil && !errors.Is(terminationErr, os.ErrProcessDone) {
+			return codexprotocol.Handoff{}, fmt.Errorf("app-server exited before completion and child cleanup failed: %w", terminationErr)
+		}
 		return codexprotocol.Handoff{}, fmt.Errorf("app-server exited before completion: %w", err)
 	}
 }
@@ -258,11 +278,26 @@ func (s *AppServerSession) handleServerRequest(peer *jsonrpc.Peer, message *json
 }
 
 type appServerRunState struct {
-	mu          sync.Mutex
-	threadID    string
-	turnID      string
-	public      strings.Builder
-	completedCh chan turnResult
+	mu                sync.Mutex
+	threadID          string
+	turnID            string
+	public            strings.Builder
+	pendingDeltas     []pendingDelta
+	pendingCompletion *turnCompletion
+	completionSent    bool
+	completedCh       chan turnResult
+}
+
+type pendingDelta struct {
+	threadID string
+	turnID   string
+	delta    string
+}
+
+type turnCompletion struct {
+	threadID string
+	turnID   string
+	status   string
 }
 
 func (s *appServerRunState) setThreadID(id string) {
@@ -271,22 +306,92 @@ func (s *appServerRunState) setThreadID(id string) {
 	s.mu.Unlock()
 }
 
-func (s *appServerRunState) setTurnID(id string) {
+func (s *appServerRunState) setTurnIDAndFlush(id string) *turnResult {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.turnID = id
+	for _, delta := range s.pendingDeltas {
+		if s.matchesLocked(delta.threadID, delta.turnID) && s.public.Len()+len(delta.delta) <= codexprotocol.MaxHandoffBytes {
+			s.public.WriteString(delta.delta)
+		}
+	}
+	s.pendingDeltas = nil
+	if !s.completionSent && s.pendingCompletion != nil && s.matchesLocked(s.pendingCompletion.threadID, s.pendingCompletion.turnID) {
+		completion := *s.pendingCompletion
+		s.pendingCompletion = nil
+		return s.finalizeCompletionLocked(completion)
+	}
+	return nil
+}
+
+func (s *appServerRunState) matchesLocked(threadID, turnID string) bool {
+	return threadID == s.threadID && turnID == s.turnID
+}
+
+func (s *appServerRunState) acceptDelta(delta pendingDelta) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if delta.threadID == "" || delta.turnID == "" || s.completionSent {
+		return
+	}
+	if s.threadID == "" || s.turnID == "" {
+		s.pendingDeltas = append(s.pendingDeltas, delta)
+		return
+	}
+	if s.matchesLocked(delta.threadID, delta.turnID) && s.public.Len()+len(delta.delta) <= codexprotocol.MaxHandoffBytes {
+		s.public.WriteString(delta.delta)
+	}
+}
+
+func (s *appServerRunState) acceptCompletion(completion turnCompletion) *turnResult {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if completion.threadID == "" || completion.turnID == "" || !validTurnCompletionStatus(completion.status) || s.completionSent {
+		return nil
+	}
+	if s.threadID == "" || s.turnID == "" {
+		s.pendingCompletion = &completion
+		return nil
+	}
+	if !s.matchesLocked(completion.threadID, completion.turnID) {
+		return nil
+	}
+	return s.finalizeCompletionLocked(completion)
+}
+
+func (s *appServerRunState) finalizeCompletionLocked(completion turnCompletion) *turnResult {
+	s.completionSent = true
+	if completion.status == "failed" || completion.status == "interrupted" {
+		return &turnResult{err: fmt.Errorf("app-server turn %s", completion.status)}
+	}
+	return &turnResult{message: strings.TrimSpace(s.public.String())}
+}
+
+func (s *appServerRunState) fail(err error) {
+	s.mu.Lock()
+	if s.completionSent {
+		s.mu.Unlock()
+		return
+	}
+	s.completionSent = true
 	s.mu.Unlock()
+	s.deliverCompletion(turnResult{err: err})
 }
 
-func (s *appServerRunState) turnIDValue() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.turnID
+func (s *appServerRunState) deliverCompletion(result turnResult) {
+	select {
+	case s.completedCh <- result:
+	default:
+	}
 }
 
-func (s *appServerRunState) ids() (string, string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.threadID, s.turnID
+func validTurnCompletionStatus(status string) bool {
+	switch status {
+	case "completed", "failed", "interrupted":
+		return true
+	default:
+		return false
+	}
 }
 
 type turnResult struct {
@@ -295,39 +400,23 @@ type turnResult struct {
 }
 
 func (s *AppServerSession) handleNotification(method string, params json.RawMessage, state *appServerRunState, emit func(codexprotocol.TaskEvent)) {
-	currentThreadID, currentTurnID := state.ids()
 	switch method {
 	case "turn/completed":
-		emit(codexprotocol.TaskEvent{State: codexprotocol.StateCompleted, Kind: "turn_completed", At: time.Now().UTC()})
 		var completed struct {
 			ThreadID string `json:"threadId"`
-			TurnID   string `json:"turnId"`
 			Turn     struct {
 				ID     string `json:"id"`
 				Status string `json:"status"`
 			} `json:"turn"`
 		}
-		if json.Unmarshal(params, &completed) != nil {
-			state.completedCh <- turnResult{err: errors.New("decode turn/completed notification")}
+		if json.Unmarshal(params, &completed) != nil || completed.ThreadID == "" || completed.Turn.ID == "" || !validTurnCompletionStatus(completed.Turn.Status) {
+			state.fail(errors.New("invalid turn/completed notification"))
 			return
 		}
-		turnID := completed.TurnID
-		status := "completed"
-		if completed.Turn.ID != "" {
-			turnID = completed.Turn.ID
-			status = completed.Turn.Status
+		if result := state.acceptCompletion(turnCompletion{threadID: completed.ThreadID, turnID: completed.Turn.ID, status: completed.Turn.Status}); result != nil {
+			emit(codexprotocol.TaskEvent{State: codexprotocol.StateCompleted, Kind: "turn_completed", At: time.Now().UTC()})
+			state.deliverCompletion(*result)
 		}
-		if completed.ThreadID != "" && completed.ThreadID != currentThreadID {
-			return
-		}
-		if turnID != "" && turnID != currentTurnID {
-			return
-		}
-		if status == "failed" || status == "interrupted" {
-			state.completedCh <- turnResult{err: fmt.Errorf("app-server turn %s", status)}
-			return
-		}
-		state.completedCh <- turnResult{message: strings.TrimSpace(state.public.String())}
 	case "item/agentMessage/delta", "item/commandExecution/outputDelta":
 		if method == "item/agentMessage/delta" {
 			var delta struct {
@@ -335,43 +424,59 @@ func (s *AppServerSession) handleNotification(method string, params json.RawMess
 				TurnID   string `json:"turnId"`
 				Delta    string `json:"delta"`
 			}
-			if json.Unmarshal(params, &delta) == nil && (delta.ThreadID == "" || delta.ThreadID == currentThreadID) && (delta.TurnID == "" || delta.TurnID == currentTurnID) {
-				if state.public.Len()+len(delta.Delta) <= codexprotocol.MaxHandoffBytes {
-					state.public.WriteString(delta.Delta)
-				}
+			if json.Unmarshal(params, &delta) == nil {
+				state.acceptDelta(pendingDelta{threadID: delta.ThreadID, turnID: delta.TurnID, delta: delta.Delta})
 			}
 		}
 		emit(codexprotocol.TaskEvent{State: codexprotocol.StateRunning, Kind: "progress", Metadata: map[string]string{"source": method}, At: time.Now().UTC()})
 	case "error":
 		emit(codexprotocol.TaskEvent{State: codexprotocol.StateFailed, Kind: "app_server_error", At: time.Now().UTC()})
-		state.completedCh <- turnResult{err: errors.New("app-server emitted an error")}
+		state.fail(errors.New("app-server emitted an error"))
 	}
 }
 
 func (s *AppServerSession) failedProcess(cmd *exec.Cmd, stdin io.WriteCloser, peer *jsonrpc.Peer, waitCh <-chan error, serveDone <-chan struct{}, err error) (codexprotocol.Handoff, error) {
-	s.closeTransport(stdin, peer, serveDone)
-	if cmd.Process != nil {
-		_ = cmd.Process.Kill()
-	}
-	select {
-	case <-waitCh:
-	case <-time.After(time.Second):
+	if closeErr := s.closeProcess(cmd, stdin, peer, serveDone, waitCh); closeErr != nil {
+		return codexprotocol.Handoff{}, fmt.Errorf("%w (child cleanup: %v)", err, closeErr)
 	}
 	return codexprotocol.Handoff{}, err
 }
 
-func (s *AppServerSession) closeProcess(cmd *exec.Cmd, stdin io.WriteCloser, peer *jsonrpc.Peer, serveDone <-chan struct{}, waitCh <-chan error) {
-	s.closeTransport(stdin, peer, serveDone)
+func terminateAndWait(cmd *exec.Cmd) error {
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- cmd.Wait() }()
+	if err := terminateChild(cmd); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		releaseChildProcess(cmd)
+		return err
+	}
 	select {
 	case <-waitCh:
+		return nil
+	case <-time.After(2 * time.Second):
+		return errors.New("app-server process tree did not terminate")
+	}
+}
+
+func (s *AppServerSession) closeProcess(cmd *exec.Cmd, stdin io.WriteCloser, peer *jsonrpc.Peer, serveDone <-chan struct{}, waitCh <-chan error) error {
+	s.closeTransport(stdin, peer, serveDone)
+	// Signal the process group/job even when the leader has already exited so
+	// descendants cannot outlive a terminal task.
+	terminateErr := terminateChild(cmd)
+	if terminateErr != nil && !errors.Is(terminateErr, os.ErrProcessDone) {
+		return fmt.Errorf("terminate app-server process tree: %w", terminateErr)
+	}
+	select {
+	case <-waitCh:
+		releaseChildProcess(cmd)
+		return nil
 	default:
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
-		select {
-		case <-waitCh:
-		case <-time.After(time.Second):
-		}
+	}
+	select {
+	case <-waitCh:
+		releaseChildProcess(cmd)
+		return nil
+	case <-time.After(2 * time.Second):
+		return errors.New("app-server process tree did not terminate")
 	}
 }
 
@@ -384,15 +489,19 @@ func (s *AppServerSession) closeTransport(stdin io.WriteCloser, peer *jsonrpc.Pe
 	}
 }
 
-func (s *AppServerSession) interruptAndClose(reason error, cmd *exec.Cmd, stdin io.WriteCloser, peer *jsonrpc.Peer, serveDone <-chan struct{}, waitCh <-chan error, threadID, turnID string) {
+func (s *AppServerSession) interruptAndClose(reason error, cmd *exec.Cmd, stdin io.WriteCloser, peer *jsonrpc.Peer, serveDone <-chan struct{}, waitCh <-chan error, threadID, turnID string) error {
 	interruptCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 	_, _, _ = peer.Call(interruptCtx, "turn/interrupt", mustJSON(map[string]any{
 		"threadId": threadID,
 		"turnId":   turnID,
 	}))
 	cancel()
-	s.closeProcess(cmd, stdin, peer, serveDone, waitCh)
-	_ = reason
+	if err := s.closeProcess(cmd, stdin, peer, serveDone, waitCh); err != nil {
+		// Do not wrap reason here: a failed termination must become lost at
+		// the Worker boundary, never cancelled with its lease released.
+		return fmt.Errorf("interrupt after %v; child cleanup: %w", reason, err)
+	}
+	return reason
 }
 
 func appServerCWD(path string) (string, error) {

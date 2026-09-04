@@ -27,7 +27,7 @@ func (fakeWorkerClient) Create(context.Context, codexprotocol.TaskRequest) (json
 }
 
 func (fakeWorkerClient) Status(context.Context, string) (json.RawMessage, error) {
-	return json.RawMessage(`{"taskId":"task-1","state":"running"}`), nil
+	return json.RawMessage(`{"taskId":"task-1","attemptId":"attempt-1","leaseEpoch":1,"state":"running"}`), nil
 }
 
 func (fakeWorkerClient) Result(context.Context, string) (json.RawMessage, error) {
@@ -152,5 +152,25 @@ func TestWorkerResponsesAreWhitelistedBeforeMCPExposure(t *testing.T) {
 	result := callMCP(t, server, `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"workers.list","arguments":{}}}`)
 	if strings.Contains(responseText(t, result), "secret") {
 		t.Fatal("untrusted Worker response field crossed the MCP boundary")
+	}
+}
+
+func TestStatusAndResultCannotCrossRequestedTaskBoundary(t *testing.T) {
+	server := NewMCPServer(fakeWorkerClient{})
+	status := callMCP(t, server, `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"tasks.status","arguments":{"taskId":"task-requested"}}}`)
+	var statusResult toolResult
+	if err := json.Unmarshal(status, &statusResult); err != nil {
+		t.Fatal(err)
+	}
+	if !statusResult.IsError {
+		t.Fatal("status response for a different task was accepted")
+	}
+	result := callMCP(t, server, `{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"tasks.result","arguments":{"taskId":"task-requested"}}}`)
+	var taskResult toolResult
+	if err := json.Unmarshal(result, &taskResult); err != nil {
+		t.Fatal(err)
+	}
+	if !taskResult.IsError {
+		t.Fatal("result response for a different task was accepted")
 	}
 }

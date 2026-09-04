@@ -19,7 +19,8 @@ mDNS, accept remote approvals, or retry an unresolved app-server attempt.
 
 ```bash
 go build -o nvpair-codex-worker .
-./nvpair-codex-worker --workspace-root "$PWD"
+WORKER_TOKEN="$(openssl rand -hex 32)"
+./nvpair-codex-worker --workspace-root "$PWD" --auth-token "$WORKER_TOKEN"
 ```
 
 The default listener is `127.0.0.1:0`; use an explicit `--listen` address when
@@ -27,7 +28,8 @@ starting the Supervisor. `--state-root` overrides the per-user
 `Nvidia Corporation/Personal AI Router/codex-worker` state directory, and
 `--codex-bin` overrides the `codex` executable used for the child process.
 `--max-concurrency` sets the number of simultaneously leased workspaces
-(default `1`). Non-loopback listener addresses are rejected in Phase 1.
+(default `1`). `--auth-token` is required and must be shared with the local
+Supervisor. Non-loopback listener addresses are rejected in Phase 1.
 
 ## Protocol
 

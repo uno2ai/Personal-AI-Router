@@ -27,11 +27,15 @@ type WorkerClient interface {
 }
 
 type HTTPWorkerClient struct {
-	baseURL string
-	http    *http.Client
+	baseURL   string
+	authToken string
+	http      *http.Client
 }
 
-func NewHTTPWorkerClient(rawURL string) (*HTTPWorkerClient, error) {
+func NewHTTPWorkerClient(rawURL string, authTokens ...string) (*HTTPWorkerClient, error) {
+	if len(authTokens) > 1 {
+		return nil, errors.New("Worker client accepts at most one auth token")
+	}
 	parsed, err := url.Parse(rawURL)
 	if err != nil || parsed.Scheme != "http" || parsed.Host == "" {
 		return nil, errors.New("worker URL must be an absolute http URL")
@@ -46,6 +50,12 @@ func NewHTTPWorkerClient(rawURL string) (*HTTPWorkerClient, error) {
 	}
 	return &HTTPWorkerClient{
 		baseURL: strings.TrimRight(parsed.String(), "/"),
+		authToken: func() string {
+			if len(authTokens) == 1 {
+				return authTokens[0]
+			}
+			return ""
+		}(),
 		http: &http.Client{
 			Timeout:   30 * time.Second,
 			Transport: &http.Transport{Proxy: nil},
@@ -95,6 +105,9 @@ func (c *HTTPWorkerClient) do(ctx context.Context, method, path string, body []b
 	}
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
+	}
+	if c.authToken != "" {
+		request.Header.Set("Authorization", "Bearer "+c.authToken)
 	}
 	response, err := c.http.Do(request)
 	if err != nil {

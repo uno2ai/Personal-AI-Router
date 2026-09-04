@@ -46,3 +46,36 @@ func TestJournalRejectsMalformedCompleteRecord(t *testing.T) {
 		t.Fatal("malformed complete journal record was accepted")
 	}
 }
+
+func TestJournalRepairsCompleteFinalRecordDelimiter(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tasks.jsonl")
+	line := `{"version":1,"sequence":1,"kind":"accept","requestId":"r","record":{}}`
+	if err := os.WriteFile(path, []byte(line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := readJournal(path)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("entries=%+v err=%v", entries, err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != line+"\n" {
+		t.Fatalf("journal delimiter was not repaired: %q", data)
+	}
+	journal, err := NewJournal(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := journal.Append(journalEntry{Kind: "next", RequestID: "r2"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := journal.Close(); err != nil {
+		t.Fatal(err)
+	}
+	entries, err = readJournal(path)
+	if err != nil || len(entries) != 2 || entries[1].Sequence != 2 {
+		t.Fatalf("appended entries=%+v err=%v", entries, err)
+	}
+}

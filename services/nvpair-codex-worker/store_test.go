@@ -5,7 +5,9 @@ package main
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"nvpair-shared/codexprotocol"
@@ -218,5 +220,21 @@ func TestCapacityAndCanonicalWorkspaceAreEnforcedAtomically(t *testing.T) {
 	third := validTaskRequest("r-cap-3", "t-cap-3", "a-cap-3", 1)
 	if _, _, err := store.AcceptAt(third, "/another/workspace", 1); !errors.Is(err, ErrCapacity) {
 		t.Fatalf("expected capacity conflict, got %v", err)
+	}
+}
+
+func TestWorkspaceLeaseKeyUsesFilesystemIdentityForCaseAlias(t *testing.T) {
+	root := t.TempDir()
+	alias := strings.ToUpper(root)
+	first, err := os.Stat(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := os.Stat(alias)
+	if err != nil || !os.SameFile(first, second) {
+		t.Skip("filesystem is case-sensitive")
+	}
+	if workspaceLeaseKey(root) != workspaceLeaseKey(alias) {
+		t.Fatalf("case aliases acquired different workspace keys")
 	}
 }

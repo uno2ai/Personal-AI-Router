@@ -25,7 +25,7 @@ func TestWorkspacePolicyRejectsTraversalAndSymlinkEscape(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, path := range []string{"../secret", "linked/secret.txt", "/tmp/outside"} {
-		if _, err := policy.Resolve(codexprotocol.WorkspaceSpec{Path: path, Mode: "read"}); err == nil {
+		if _, err := policy.Resolve(codexprotocol.WorkspaceSpec{ID: "local", Path: path, Mode: "read"}); err == nil {
 			t.Errorf("Resolve(%q) accepted an unsafe path", path)
 		}
 	}

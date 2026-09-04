@@ -6,10 +6,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"runtime"
 	"strconv"
@@ -33,16 +35,22 @@ type ResultResponse struct {
 type taskRun struct {
 	session *AppServerSession
 	cancel  context.CancelFunc
+	done    chan struct{}
 }
+
+var ErrCancellationRequested = errors.New("task cancellation requested")
 
 type workerHTTPServer struct {
 	store          *TaskStore
 	factory        AppServerFactory
 	policy         WorkspacePolicy
 	maxConcurrency int
+	authToken      string
 
 	mu     sync.Mutex
 	active map[string]*taskRun
+	runs   sync.WaitGroup
+	closed bool
 }
 
 func NewServer(store *TaskStore, factory AppServerFactory, policy WorkspacePolicy) http.Handler {
@@ -50,6 +58,10 @@ func NewServer(store *TaskStore, factory AppServerFactory, policy WorkspacePolic
 }
 
 func NewServerWithCapacity(store *TaskStore, factory AppServerFactory, policy WorkspacePolicy, maxConcurrency int) http.Handler {
+	return NewServerWithCapacityAndAuth(store, factory, policy, maxConcurrency, "")
+}
+
+func NewServerWithCapacityAndAuth(store *TaskStore, factory AppServerFactory, policy WorkspacePolicy, maxConcurrency int, authToken string) http.Handler {
 	if maxConcurrency <= 0 {
 		maxConcurrency = 1
 	}
@@ -58,12 +70,16 @@ func NewServerWithCapacity(store *TaskStore, factory AppServerFactory, policy Wo
 		factory:        factory,
 		policy:         policy,
 		maxConcurrency: maxConcurrency,
+		authToken:      authToken,
 		active:         make(map[string]*taskRun),
 	}
 }
 
 func (s *workerHTTPServer) Close() {
 	s.mu.Lock()
+	if !s.closed {
+		s.closed = true
+	}
 	runs := make([]*taskRun, 0, len(s.active))
 	for _, run := range s.active {
 		runs = append(runs, run)
@@ -73,9 +89,21 @@ func (s *workerHTTPServer) Close() {
 		run.session.Cancel()
 		run.cancel()
 	}
+	done := make(chan struct{})
+	go func() {
+		s.runs.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+	}
 }
 
 func (s *workerHTTPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if !s.authorize(w, r) {
+		return
+	}
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/worker":
 		s.handleWorker(w)
@@ -86,6 +114,32 @@ func (s *workerHTTPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (s *workerHTTPServer) authorize(w http.ResponseWriter, r *http.Request) bool {
+	if s.authToken != "" {
+		provided := strings.TrimSpace(r.Header.Get("Authorization"))
+		expected := "Bearer " + s.authToken
+		if subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) != 1 {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="codex-worker"`)
+			writeError(w, http.StatusUnauthorized, "Worker authorization required")
+			return false
+		}
+	}
+	if origin := r.Header.Get("Origin"); origin != "" {
+		writeError(w, http.StatusForbidden, "browser origins are not accepted")
+		return false
+	}
+	host, _, err := net.SplitHostPort(r.Host)
+	if err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() {
+		writeError(w, http.StatusForbidden, "request Host must be a loopback address")
+		return false
+	}
+	if r.Method == http.MethodPost && !strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "application/json") {
+		writeError(w, http.StatusUnsupportedMediaType, "POST requests require application/json")
+		return false
+	}
+	return true
 }
 
 func (s *workerHTTPServer) handleWorker(w http.ResponseWriter) {
@@ -101,6 +155,20 @@ func (s *workerHTTPServer) handleWorker(w http.ResponseWriter) {
 }
 
 func (s *workerHTTPServer) handleCreate(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		writeError(w, http.StatusServiceUnavailable, "Worker is shutting down")
+		return
+	}
+	s.runs.Add(1)
+	s.mu.Unlock()
+	runTracked := true
+	defer func() {
+		if runTracked {
+			s.runs.Done()
+		}
+	}()
 	payload, err := readBoundedBody(w, r, codexprotocol.MaxContextBytes)
 	if err != nil {
 		writeError(w, http.StatusRequestEntityTooLarge, err.Error())
@@ -122,6 +190,7 @@ func (s *workerHTTPServer) handleCreate(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if !idempotent {
+		runTracked = false
 		go s.runTask(request, record, cwd)
 	}
 	writeJSON(w, http.StatusAccepted, TaskResponse{Record: record, Idempotent: idempotent})
@@ -173,7 +242,8 @@ func (s *workerHTTPServer) handleEvents(w http.ResponseWriter, r *http.Request, 
 	}
 	events := s.store.Events(taskID, after)
 	if len(events) > 100 {
-		events = events[len(events)-100:]
+		w.Header().Set("X-Next-After", strconv.FormatUint(events[99].Seq, 10))
+		events = events[:100]
 	}
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.WriteHeader(http.StatusOK)
@@ -258,22 +328,42 @@ func decodeSingleJSON(payload []byte, target any) error {
 }
 
 func (s *workerHTTPServer) runTask(request codexprotocol.TaskRequest, record codexprotocol.TaskRecord, cwd string) {
+	defer s.runs.Done()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(request.Context.Limits.WallSeconds)*time.Second)
 	session := s.factory.New()
 	s.mu.Lock()
-	s.active[record.TaskID] = &taskRun{session: session, cancel: cancel}
+	run := &taskRun{session: session, cancel: cancel, done: make(chan struct{})}
+	s.active[record.TaskID] = run
+	shuttingDown := s.closed
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
 		delete(s.active, record.TaskID)
 		s.mu.Unlock()
 		cancel()
+		close(run.done)
 	}()
 
+	if shuttingDown {
+		s.finishLost(record, "Worker shutdown before app-server start")
+		return
+	}
+	if current, ok := s.store.Get(record.TaskID); !ok {
+		return
+	} else if current.State == codexprotocol.StateCancelling {
+		s.finishCancelled(record)
+		return
+	}
 	if err := s.transition(record.Mutation, codexprotocol.StateStarting, "start"); err != nil {
+		if errors.Is(err, ErrCancellationRequested) {
+			s.finishCancelled(record)
+		}
 		return
 	}
 	if err := s.transition(record.Mutation, codexprotocol.StateRunning, "run"); err != nil {
+		if errors.Is(err, ErrCancellationRequested) {
+			s.finishCancelled(record)
+		}
 		return
 	}
 	runtimeRequest := request
@@ -362,7 +452,35 @@ func (s *workerHTTPServer) runTask(request codexprotocol.TaskRequest, record cod
 func (s *workerHTTPServer) transition(mutation codexprotocol.Mutation, state codexprotocol.TaskState, suffix string) error {
 	mutation.RequestID = mutation.RequestID + ":" + suffix
 	return s.store.Mutate(mutation, func(record *codexprotocol.TaskRecord) error {
+		if record.State == codexprotocol.StateCancelling && (state == codexprotocol.StateStarting || state == codexprotocol.StateRunning) {
+			return ErrCancellationRequested
+		}
 		record.State = state
+		return nil
+	})
+}
+
+func (s *workerHTTPServer) finishCancelled(record codexprotocol.TaskRecord) {
+	s.finishTerminal(record, codexprotocol.StateCancelled, "cancelled before app-server start", ":cancelled")
+}
+
+func (s *workerHTTPServer) finishLost(record codexprotocol.TaskRecord, summary string) {
+	s.finishTerminal(record, codexprotocol.StateLost, summary, ":shutdown")
+}
+
+func (s *workerHTTPServer) finishTerminal(record codexprotocol.TaskRecord, state codexprotocol.TaskState, summary, suffix string) {
+	handoff := codexprotocol.Handoff{
+		Version:   codexprotocol.HandoffVersion,
+		TaskID:    record.TaskID,
+		AttemptID: record.AttemptID,
+		Status:    state,
+		Summary:   summary,
+	}
+	mutation := record.Mutation
+	mutation.RequestID += suffix
+	_ = s.store.Mutate(mutation, func(current *codexprotocol.TaskRecord) error {
+		current.State = state
+		current.Handoff = &handoff
 		return nil
 	})
 }

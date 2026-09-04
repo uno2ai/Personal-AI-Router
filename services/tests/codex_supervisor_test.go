@@ -21,6 +21,8 @@ import (
 	"nvpair-shared/codexprotocol"
 )
 
+const testWorkerToken = "test-worker-token"
+
 func TestLocalDelegationProducesBoundedHandoff(t *testing.T) {
 	workspace := t.TempDir()
 	worker, workerURL, _ := startCodexWorker(t, workspace, t.TempDir())
@@ -65,6 +67,19 @@ func TestLocalDelegationProducesBoundedHandoff(t *testing.T) {
 	}
 	if len(encoded) > codexprotocol.MaxHandoffBytes {
 		t.Fatalf("handoff is %d bytes", len(encoded))
+	}
+	supervisorResult := callSupervisor(t, input, responses, 2, "tools/call", map[string]any{
+		"name":      "tasks.result",
+		"arguments": map[string]any{"taskId": accepted.Record.TaskID},
+	})
+	var supervisorCompleted struct {
+		Handoff codexprotocol.Handoff `json:"handoff"`
+	}
+	if err := json.Unmarshal([]byte(supervisorResultText(t, supervisorResult)), &supervisorCompleted); err != nil {
+		t.Fatal(err)
+	}
+	if supervisorCompleted.Handoff.TaskID != accepted.Record.TaskID {
+		t.Fatalf("Supervisor returned the wrong task result: %+v", supervisorCompleted.Handoff)
 	}
 }
 
@@ -269,7 +284,7 @@ func startCodexWorker(t *testing.T, workspace, state string, environment ...stri
 	t.Helper()
 	port := freeCodexPort(t)
 	logPath := filepath.Join(t.TempDir(), "worker.log")
-	args := []string{"--workspace-root", workspace, "--state-root", state, "--codex-bin", fakeCodexBin, "--max-concurrency", "2", "--listen", "127.0.0.1:" + strconv.Itoa(port)}
+	args := []string{"--workspace-root", workspace, "--state-root", state, "--codex-bin", fakeCodexBin, "--max-concurrency", "2", "--auth-token", testWorkerToken, "--listen", "127.0.0.1:" + strconv.Itoa(port)}
 	cmd := exec.Command(workerBin, args...)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
@@ -283,7 +298,7 @@ func startCodexWorker(t *testing.T, workspace, state string, environment ...stri
 
 func startCodexSupervisor(t *testing.T, workerURL string) (*exec.Cmd, io.WriteCloser, *bufio.Reader) {
 	t.Helper()
-	cmd := exec.Command(supervisorBin, "--worker-url", workerURL)
+	cmd := exec.Command(supervisorBin, "--worker-url", workerURL, "--worker-token", testWorkerToken)
 	input, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -388,6 +403,7 @@ func postWorkerJSON(t *testing.T, url string, payload []byte) *http.Response {
 		t.Fatal(err)
 	}
 	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+testWorkerToken)
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
@@ -407,7 +423,12 @@ func waitForWorker(t *testing.T, baseURL string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		response, err := http.Get(baseURL + "/v1/worker")
+		request, requestErr := http.NewRequest(http.MethodGet, baseURL+"/v1/worker", nil)
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		request.Header.Set("Authorization", "Bearer "+testWorkerToken)
+		response, err := http.DefaultClient.Do(request)
 		if err == nil {
 			response.Body.Close()
 			if response.StatusCode == http.StatusOK {
@@ -423,7 +444,12 @@ func waitForWorkerResult(t *testing.T, baseURL, taskID string) []byte {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		response, err := http.Get(baseURL + "/v1/tasks/" + taskID + "/result")
+		request, requestErr := http.NewRequest(http.MethodGet, baseURL+"/v1/tasks/"+taskID+"/result", nil)
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		request.Header.Set("Authorization", "Bearer "+testWorkerToken)
+		response, err := http.DefaultClient.Do(request)
 		if err == nil {
 			data, readErr := io.ReadAll(response.Body)
 			response.Body.Close()
@@ -446,7 +472,12 @@ type workerStatus struct {
 
 func getWorkerStatus(t *testing.T, baseURL, taskID string) workerStatus {
 	t.Helper()
-	response, err := http.Get(baseURL + "/v1/tasks/" + taskID)
+	request, err := http.NewRequest(http.MethodGet, baseURL+"/v1/tasks/"+taskID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+testWorkerToken)
+	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}

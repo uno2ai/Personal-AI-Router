@@ -132,7 +132,7 @@ func (s *MCPServer) handleTool(ctx context.Context, params json.RawMessage) (any
 	}
 	switch call.Name {
 	case "workers.list":
-		return s.callWorker(ctx, "workers.list", func() (json.RawMessage, error) { return s.client.Worker(ctx) })
+		return s.callWorker(ctx, "workers.list", "", func() (json.RawMessage, error) { return s.client.Worker(ctx) })
 	case "tasks.delegate":
 		return s.delegate(ctx, call.Arguments)
 	case "tasks.status":
@@ -142,7 +142,7 @@ func (s *MCPServer) handleTool(ctx context.Context, params json.RawMessage) (any
 		if err := decodeArgs(call.Arguments, &args); err != nil || args.TaskID == "" {
 			return nil, -32602, "tasks.status requires taskId"
 		}
-		return s.callWorker(ctx, "tasks.status", func() (json.RawMessage, error) { return s.client.Status(ctx, args.TaskID) })
+		return s.callWorker(ctx, "tasks.status", args.TaskID, func() (json.RawMessage, error) { return s.client.Status(ctx, args.TaskID) })
 	case "tasks.result":
 		var args struct {
 			TaskID string `json:"taskId"`
@@ -150,7 +150,7 @@ func (s *MCPServer) handleTool(ctx context.Context, params json.RawMessage) (any
 		if err := decodeArgs(call.Arguments, &args); err != nil || args.TaskID == "" {
 			return nil, -32602, "tasks.result requires taskId"
 		}
-		return s.callWorker(ctx, "tasks.result", func() (json.RawMessage, error) { return s.client.Result(ctx, args.TaskID) })
+		return s.callWorker(ctx, "tasks.result", args.TaskID, func() (json.RawMessage, error) { return s.client.Result(ctx, args.TaskID) })
 	case "tasks.cancel":
 		var args struct {
 			TaskID     string `json:"taskId"`
@@ -165,7 +165,7 @@ func (s *MCPServer) handleTool(ctx context.Context, params json.RawMessage) (any
 			return toolError("could not allocate cancellation request id"), 0, ""
 		}
 		mutation := codexprotocol.Mutation{ProtocolVersion: codexprotocol.ProtocolVersion, RequestID: requestID, TaskID: args.TaskID, AttemptID: args.AttemptID, LeaseEpoch: args.LeaseEpoch}
-		return s.callWorker(ctx, "tasks.cancel", func() (json.RawMessage, error) { return s.client.Cancel(ctx, mutation) })
+		return s.callWorker(ctx, "tasks.cancel", args.TaskID, func() (json.RawMessage, error) { return s.client.Cancel(ctx, mutation) })
 	case "artifacts.get":
 		return toolError("artifact transport is not available in Phase 1"), 0, ""
 	default:
@@ -213,15 +213,15 @@ func (s *MCPServer) delegate(ctx context.Context, raw json.RawMessage) (any, int
 		Workspace: codexprotocol.WorkspaceSpec{ID: "local", Path: "local", Mode: args.Mode},
 		Execution: codexprotocol.ExecutionSpec{Sandbox: sandboxForMode(args.Mode), Approval: "local-only"},
 	}
-	return s.callWorker(ctx, "tasks.delegate", func() (json.RawMessage, error) { return s.client.Create(ctx, request) })
+	return s.callWorker(ctx, "tasks.delegate", "", func() (json.RawMessage, error) { return s.client.Create(ctx, request) })
 }
 
-func (s *MCPServer) callWorker(ctx context.Context, toolName string, call func() (json.RawMessage, error)) (any, int, string) {
+func (s *MCPServer) callWorker(ctx context.Context, toolName, expectedTaskID string, call func() (json.RawMessage, error)) (any, int, string) {
 	result, err := call()
 	if err != nil {
 		return toolError(err.Error()), 0, ""
 	}
-	sanitized, err := sanitizeWorkerResponse(toolName, result)
+	sanitized, err := sanitizeWorkerResponse(toolName, result, expectedTaskID)
 	if err != nil {
 		return toolError("Worker returned an invalid response"), 0, ""
 	}
@@ -246,7 +246,7 @@ func decodeArgs(raw json.RawMessage, target any) error {
 	}()
 }
 
-func sanitizeWorkerResponse(toolName string, raw json.RawMessage) (json.RawMessage, error) {
+func sanitizeWorkerResponse(toolName string, raw json.RawMessage, expectedTaskID string) (json.RawMessage, error) {
 	switch toolName {
 	case "workers.list":
 		var response struct {
@@ -272,11 +272,23 @@ func sanitizeWorkerResponse(toolName string, raw json.RawMessage) (json.RawMessa
 		if err := json.Unmarshal(raw, &response); err != nil {
 			return nil, err
 		}
+		if response.Record.TaskID == "" || response.Record.AttemptID == "" || response.Record.LeaseEpoch == 0 {
+			return nil, errors.New("Worker returned an incomplete task record")
+		}
+		if expectedTaskID != "" && response.Record.TaskID != expectedTaskID {
+			return nil, errors.New("Worker returned a different task")
+		}
 		return json.Marshal(response)
 	case "tasks.status", "tasks.cancel":
 		var response codexprotocol.TaskRecord
 		if err := json.Unmarshal(raw, &response); err != nil {
 			return nil, err
+		}
+		if response.TaskID == "" || response.AttemptID == "" || response.LeaseEpoch == 0 {
+			return nil, errors.New("Worker returned an incomplete task record")
+		}
+		if expectedTaskID != "" && response.TaskID != expectedTaskID {
+			return nil, errors.New("Worker returned a different task")
 		}
 		return json.Marshal(response)
 	case "tasks.result":
@@ -286,6 +298,12 @@ func sanitizeWorkerResponse(toolName string, raw json.RawMessage) (json.RawMessa
 		}
 		if err := json.Unmarshal(raw, &response); err != nil {
 			return nil, err
+		}
+		if response.Record.TaskID == "" || response.Record.AttemptID == "" || response.Record.LeaseEpoch == 0 {
+			return nil, errors.New("Worker returned an incomplete task record")
+		}
+		if expectedTaskID != "" && response.Record.TaskID != expectedTaskID {
+			return nil, errors.New("Worker returned a different task")
 		}
 		if err := response.Handoff.Validate(response.Record.TaskID, response.Record.AttemptID); err != nil {
 			return nil, err

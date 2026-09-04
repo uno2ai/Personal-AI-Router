@@ -31,7 +31,7 @@ type journalEntry struct {
 type Journal struct {
 	mu       sync.Mutex
 	file     *os.File
-	lockFile *os.File
+	lockFile *journalLockHandle
 	path     string
 	sequence uint64
 	closed   bool
@@ -128,7 +128,8 @@ func readJournal(path string) ([]journalEntry, error) {
 
 	var entries []journalEntry
 	var previous uint64
-	lines := strings.Split(string(data), "\n")
+	textData := string(data)
+	lines := strings.Split(textData, "\n")
 	for index, line := range lines {
 		if line == "" && index == len(lines)-1 {
 			continue
@@ -139,8 +140,8 @@ func readJournal(path string) ([]journalEntry, error) {
 			// before the newline reaches durable storage. Earlier records are
 			// already fsync'd, so only that demonstrably incomplete tail may be
 			// ignored. A malformed newline-terminated record remains fatal.
-			if index == len(lines)-1 && !strings.HasSuffix(string(data), "\n") && strings.Contains(err.Error(), "unexpected end of JSON input") {
-				if truncateErr := os.Truncate(path, int64(strings.LastIndexByte(string(data), '\n')+1)); truncateErr != nil {
+			if index == len(lines)-1 && !strings.HasSuffix(textData, "\n") && strings.Contains(err.Error(), "unexpected end of JSON input") {
+				if truncateErr := repairJournalTail(path, data[:strings.LastIndexByte(textData, '\n')+1]); truncateErr != nil {
 					return nil, fmt.Errorf("repair incomplete journal tail: %w", truncateErr)
 				}
 				break
@@ -155,6 +156,30 @@ func readJournal(path string) ([]journalEntry, error) {
 		}
 		previous = entry.Sequence
 		entries = append(entries, entry)
+		if index == len(lines)-1 && !strings.HasSuffix(textData, "\n") {
+			// A valid final JSON object without its frame delimiter is still
+			// recoverable, but it must be repaired before the next append or
+			// two JSON objects would be concatenated into one invalid line.
+			if err := repairJournalTail(path, append(data, '\n')); err != nil {
+				return nil, fmt.Errorf("repair journal delimiter: %w", err)
+			}
+		}
 	}
 	return entries, nil
+}
+
+func repairJournalTail(path string, data []byte) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	return file.Close()
 }
