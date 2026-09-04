@@ -326,7 +326,7 @@ The v1 package limit is 256 KiB excluding separately transferred artifacts:
   "constraints": ["No edits", "Run Windows-native tests"],
   "requiredEvidence": ["commands", "test outcomes", "file references"],
   "limits": {"wallSeconds": 1800},
-  "execution": {"sandbox": "workspace-read", "approval": "local-only"},
+  "execution": {"sandbox": "read-only", "approval": "local-only"},
   "inputs": [{"artifactId": "a1", "sha256": "..."}]
 }
 ```

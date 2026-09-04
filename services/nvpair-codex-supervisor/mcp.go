@@ -4,12 +4,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"strings"
 
@@ -132,36 +132,40 @@ func (s *MCPServer) handleTool(ctx context.Context, params json.RawMessage) (any
 	}
 	switch call.Name {
 	case "workers.list":
-		return s.callWorker(ctx, func() (json.RawMessage, error) { return s.client.Worker(ctx) })
+		return s.callWorker(ctx, "workers.list", func() (json.RawMessage, error) { return s.client.Worker(ctx) })
 	case "tasks.delegate":
 		return s.delegate(ctx, call.Arguments)
 	case "tasks.status":
 		var args struct {
 			TaskID string `json:"taskId"`
 		}
-		if err := json.Unmarshal(call.Arguments, &args); err != nil || args.TaskID == "" {
+		if err := decodeArgs(call.Arguments, &args); err != nil || args.TaskID == "" {
 			return nil, -32602, "tasks.status requires taskId"
 		}
-		return s.callWorker(ctx, func() (json.RawMessage, error) { return s.client.Status(ctx, args.TaskID) })
+		return s.callWorker(ctx, "tasks.status", func() (json.RawMessage, error) { return s.client.Status(ctx, args.TaskID) })
 	case "tasks.result":
 		var args struct {
 			TaskID string `json:"taskId"`
 		}
-		if err := json.Unmarshal(call.Arguments, &args); err != nil || args.TaskID == "" {
+		if err := decodeArgs(call.Arguments, &args); err != nil || args.TaskID == "" {
 			return nil, -32602, "tasks.result requires taskId"
 		}
-		return s.callWorker(ctx, func() (json.RawMessage, error) { return s.client.Result(ctx, args.TaskID) })
+		return s.callWorker(ctx, "tasks.result", func() (json.RawMessage, error) { return s.client.Result(ctx, args.TaskID) })
 	case "tasks.cancel":
 		var args struct {
 			TaskID     string `json:"taskId"`
 			AttemptID  string `json:"attemptId"`
 			LeaseEpoch uint64 `json:"leaseEpoch"`
 		}
-		if err := json.Unmarshal(call.Arguments, &args); err != nil || args.TaskID == "" || args.AttemptID == "" || args.LeaseEpoch == 0 {
+		if err := decodeArgs(call.Arguments, &args); err != nil || args.TaskID == "" || args.AttemptID == "" || args.LeaseEpoch == 0 {
 			return nil, -32602, "tasks.cancel requires taskId, attemptId, and leaseEpoch"
 		}
-		mutation := codexprotocol.Mutation{ProtocolVersion: codexprotocol.ProtocolVersion, RequestID: newID("cancel"), TaskID: args.TaskID, AttemptID: args.AttemptID, LeaseEpoch: args.LeaseEpoch}
-		return s.callWorker(ctx, func() (json.RawMessage, error) { return s.client.Cancel(ctx, mutation) })
+		requestID, err := newID("cancel")
+		if err != nil {
+			return toolError("could not allocate cancellation request id"), 0, ""
+		}
+		mutation := codexprotocol.Mutation{ProtocolVersion: codexprotocol.ProtocolVersion, RequestID: requestID, TaskID: args.TaskID, AttemptID: args.AttemptID, LeaseEpoch: args.LeaseEpoch}
+		return s.callWorker(ctx, "tasks.cancel", func() (json.RawMessage, error) { return s.client.Cancel(ctx, mutation) })
 	case "artifacts.get":
 		return toolError("artifact transport is not available in Phase 1"), 0, ""
 	default:
@@ -176,7 +180,7 @@ func (s *MCPServer) delegate(ctx context.Context, raw json.RawMessage) (any, int
 		Mode      string `json:"mode"`
 		Approval  string `json:"approval"`
 	}
-	if err := json.Unmarshal(raw, &args); err != nil || strings.TrimSpace(args.Objective) == "" {
+	if err := decodeArgs(raw, &args); err != nil || strings.TrimSpace(args.Objective) == "" {
 		return nil, -32602, "tasks.delegate requires objective"
 	}
 	if args.Workspace == "" {
@@ -191,22 +195,105 @@ func (s *MCPServer) delegate(ctx context.Context, raw json.RawMessage) (any, int
 	if args.Workspace != "local" || (args.Mode != "read" && args.Mode != "write") || args.Approval != "local-only" {
 		return nil, -32602, "tasks.delegate accepts only local workspace, read/write mode, and local-only approval"
 	}
-	taskID := newID("task")
+	taskID, err := newID("task")
+	if err != nil {
+		return toolError("could not allocate task id"), 0, ""
+	}
+	requestID, err := newID("request")
+	if err != nil {
+		return toolError("could not allocate request id"), 0, ""
+	}
+	attemptID, err := newID("attempt")
+	if err != nil {
+		return toolError("could not allocate attempt id"), 0, ""
+	}
 	request := codexprotocol.TaskRequest{
-		Mutation:  codexprotocol.Mutation{ProtocolVersion: codexprotocol.ProtocolVersion, RequestID: newID("request"), TaskID: taskID, AttemptID: newID("attempt"), LeaseEpoch: 1},
+		Mutation:  codexprotocol.Mutation{ProtocolVersion: codexprotocol.ProtocolVersion, RequestID: requestID, TaskID: taskID, AttemptID: attemptID, LeaseEpoch: 1},
 		Context:   codexprotocol.ContextPackage{Version: codexprotocol.ContextVersion, Objective: args.Objective, Limits: codexprotocol.Limits{WallSeconds: 1800}},
 		Workspace: codexprotocol.WorkspaceSpec{ID: "local", Path: "local", Mode: args.Mode},
 		Execution: codexprotocol.ExecutionSpec{Sandbox: sandboxForMode(args.Mode), Approval: "local-only"},
 	}
-	return s.callWorker(ctx, func() (json.RawMessage, error) { return s.client.Create(ctx, request) })
+	return s.callWorker(ctx, "tasks.delegate", func() (json.RawMessage, error) { return s.client.Create(ctx, request) })
 }
 
-func (s *MCPServer) callWorker(ctx context.Context, call func() (json.RawMessage, error)) (any, int, string) {
+func (s *MCPServer) callWorker(ctx context.Context, toolName string, call func() (json.RawMessage, error)) (any, int, string) {
 	result, err := call()
 	if err != nil {
 		return toolError(err.Error()), 0, ""
 	}
-	return toolSuccess(result), 0, ""
+	sanitized, err := sanitizeWorkerResponse(toolName, result)
+	if err != nil {
+		return toolError("Worker returned an invalid response"), 0, ""
+	}
+	return toolSuccess(sanitized), 0, ""
+}
+
+func decodeArgs(raw json.RawMessage, target any) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	var extra any
+	return func() error {
+		if err := decoder.Decode(&extra); err != io.EOF {
+			if err == nil {
+				return errors.New("multiple JSON values")
+			}
+			return err
+		}
+		return nil
+	}()
+}
+
+func sanitizeWorkerResponse(toolName string, raw json.RawMessage) (json.RawMessage, error) {
+	switch toolName {
+	case "workers.list":
+		var response struct {
+			ProtocolVersion int            `json:"protocolVersion"`
+			Version         string         `json:"version"`
+			Capabilities    map[string]any `json:"capabilities"`
+		}
+		if err := json.Unmarshal(raw, &response); err != nil {
+			return nil, err
+		}
+		capabilities := map[string]any{}
+		for _, key := range []string{"os", "architecture", "maxConcurrency"} {
+			if value, ok := response.Capabilities[key]; ok {
+				capabilities[key] = value
+			}
+		}
+		return json.Marshal(map[string]any{"protocolVersion": response.ProtocolVersion, "version": response.Version, "capabilities": capabilities})
+	case "tasks.delegate":
+		var response struct {
+			Record     codexprotocol.TaskRecord `json:"record"`
+			Idempotent bool                     `json:"idempotent"`
+		}
+		if err := json.Unmarshal(raw, &response); err != nil {
+			return nil, err
+		}
+		return json.Marshal(response)
+	case "tasks.status", "tasks.cancel":
+		var response codexprotocol.TaskRecord
+		if err := json.Unmarshal(raw, &response); err != nil {
+			return nil, err
+		}
+		return json.Marshal(response)
+	case "tasks.result":
+		var response struct {
+			Record  codexprotocol.TaskRecord `json:"record"`
+			Handoff codexprotocol.Handoff    `json:"handoff"`
+		}
+		if err := json.Unmarshal(raw, &response); err != nil {
+			return nil, err
+		}
+		if err := response.Handoff.Validate(response.Record.TaskID, response.Record.AttemptID); err != nil {
+			return nil, err
+		}
+		return json.Marshal(response)
+	default:
+		return nil, errors.New("unsupported Worker response")
+	}
 }
 
 func toolSuccess(raw json.RawMessage) toolResult {
@@ -224,10 +311,10 @@ func sandboxForMode(mode string) string {
 	return "read-only"
 }
 
-func newID(prefix string) string {
+func newID(prefix string) (string, error) {
 	var data [12]byte
 	if _, err := rand.Read(data[:]); err != nil {
-		return fmt.Sprintf("%s-local", prefix)
+		return "", err
 	}
-	return prefix + "-" + hex.EncodeToString(data[:])
+	return prefix + "-" + hex.EncodeToString(data[:]), nil
 }

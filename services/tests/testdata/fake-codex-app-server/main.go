@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 )
 
 func main() {
@@ -24,22 +25,30 @@ func main() {
 
 	scanner := bufio.NewScanner(os.Stdin)
 	encoder := json.NewEncoder(os.Stdout)
+	initialized := false
 	for scanner.Scan() {
 		line := scanner.Bytes()
-		if logFile != nil {
-			_, _ = fmt.Fprintln(logFile, string(line))
-		}
 		var message struct {
 			ID     json.RawMessage `json:"id"`
 			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
 		}
 		if err := json.Unmarshal(line, &message); err != nil {
 			return
 		}
+		if logFile != nil && message.Method != "" {
+			_, _ = fmt.Fprintln(logFile, message.Method)
+		}
 		switch message.Method {
 		case "initialize":
 			_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": message.ID, "result": map[string]any{}})
+		case "initialized":
+			initialized = true
 		case "thread/start":
+			if !initialized {
+				_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": message.ID, "error": map[string]any{"code": -32000, "message": "initialized notification required"}})
+				continue
+			}
 			_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": message.ID, "result": map[string]any{"thread": map[string]string{"id": "fixture-thread"}}})
 		case "turn/start":
 			_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": message.ID, "result": map[string]any{"turn": map[string]string{"id": "fixture-turn"}}})
@@ -50,7 +59,7 @@ func main() {
 					return
 				}
 				if logFile != nil {
-					_, _ = fmt.Fprintln(logFile, scanner.Text())
+					_, _ = fmt.Fprintln(logFile, "approval-response")
 				}
 				return
 			case "exit":
@@ -58,11 +67,35 @@ func main() {
 			case "hold":
 				continue
 			default:
-				_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "method": "turn/completed", "params": map[string]string{"turnId": "fixture-turn"}})
+				var turnParams struct {
+					Input []struct {
+						Text string `json:"text"`
+					} `json:"input"`
+				}
+				_ = json.Unmarshal(message.Params, &turnParams)
+				prompt := ""
+				if len(turnParams.Input) > 0 {
+					prompt = turnParams.Input[0].Text
+				}
+				handoff := fmt.Sprintf(`{"version":1,"taskId":%q,"attemptId":%q,"status":"completed","summary":"fixture completed"}`, promptValue(prompt, "Task ID: "), promptValue(prompt, "Attempt ID: "))
+				_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "method": "item/agentMessage/delta", "params": map[string]string{"itemId": "fixture-item", "threadId": "fixture-thread", "turnId": "fixture-turn", "delta": handoff}})
+				_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "method": "turn/completed", "params": map[string]any{"threadId": "fixture-thread", "turn": map[string]string{"id": "fixture-turn", "status": "completed"}}})
 			}
 		case "turn/interrupt":
 			_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": message.ID, "result": map[string]any{}})
 			return
 		}
 	}
+}
+
+func promptValue(prompt, prefix string) string {
+	start := strings.Index(prompt, prefix)
+	if start < 0 {
+		return ""
+	}
+	value := prompt[start+len(prefix):]
+	if end := strings.IndexByte(value, '\n'); end >= 0 {
+		value = value[:end]
+	}
+	return strings.TrimSpace(value)
 }

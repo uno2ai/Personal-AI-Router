@@ -49,6 +49,9 @@ func (p WorkspacePolicy) Resolve(spec codexprotocol.WorkspaceSpec) (string, erro
 		relative = relative[len("local/"):]
 	}
 	candidate := filepath.Join(p.root, relative)
+	if err := rejectSymlinkComponents(p.root, candidate); err != nil {
+		return "", err
+	}
 	canonical, err := filepath.EvalSymlinks(candidate)
 	if err != nil {
 		return "", fmt.Errorf("resolve workspace path: %w", err)
@@ -57,7 +60,10 @@ func (p WorkspacePolicy) Resolve(spec codexprotocol.WorkspaceSpec) (string, erro
 	if err != nil || contained == ".." || strings.HasPrefix(contained, ".."+string(filepath.Separator)) {
 		return "", errors.New("workspace path escapes configured root")
 	}
-	if err := rejectSymlinkComponents(p.root, canonical); err != nil {
+	// Re-check immediately after canonicalization to narrow the check/use
+	// window. The app-server is launched with this exact canonical cwd; a
+	// future Windows implementation must additionally reject reparse points.
+	if err := rejectSymlinkComponents(p.root, candidate); err != nil {
 		return "", err
 	}
 	return canonical, nil
@@ -78,7 +84,7 @@ func rejectSymlinkComponents(root, target string) error {
 		if err != nil {
 			return fmt.Errorf("inspect workspace component: %w", err)
 		}
-		if info.Mode()&os.ModeSymlink != 0 {
+		if info.Mode()&os.ModeSymlink != 0 || isReparsePoint(current) {
 			return fmt.Errorf("workspace path contains symlink component %q", component)
 		}
 	}

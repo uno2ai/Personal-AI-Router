@@ -102,7 +102,7 @@ func TestRestartReplaysIdempotencyWithoutSecondTurn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Count(string(logData), `"method":"turn/start"`); got != 1 {
+	if got := strings.Count(string(logData), "turn/start\n"); got != 1 {
 		t.Fatalf("fixture saw %d turn/start calls, want 1", got)
 	}
 }
@@ -111,6 +111,7 @@ func TestStaleAttemptCannotRetrySameWorkspace(t *testing.T) {
 	workspace := t.TempDir()
 	logPath := filepath.Join(t.TempDir(), "app-server.log")
 	worker, workerURL, _ := startCodexWorker(t, workspace, t.TempDir(), "CODEX_FAKE_LOG="+logPath, "CODEX_FAKE_MODE=exit")
+	t.Cleanup(func() { stopCodexProcess(worker) })
 	request := crossProcessTaskRequest("request-lost", "task-lost", "attempt-1", 1)
 	payload, err := json.Marshal(request)
 	if err != nil {
@@ -120,7 +121,7 @@ func TestStaleAttemptCannotRetrySameWorkspace(t *testing.T) {
 	if created.StatusCode != http.StatusAccepted {
 		t.Fatalf("create status %d", created.StatusCode)
 	}
-	waitForWorkerState(t, workerURL, request.TaskID, codexprotocol.StateFailed)
+	waitForWorkerState(t, workerURL, request.TaskID, codexprotocol.StateLost)
 	retry := crossProcessTaskRequest("request-lost-retry", "task-lost", "attempt-2", 2)
 	retryPayload, err := json.Marshal(retry)
 	if err != nil {
@@ -130,12 +131,21 @@ func TestStaleAttemptCannotRetrySameWorkspace(t *testing.T) {
 	if retried.StatusCode != http.StatusConflict {
 		t.Fatalf("unfenced retry status %d", retried.StatusCode)
 	}
+	other := crossProcessTaskRequest("request-lost-other", "task-lost-other", "attempt-1", 1)
+	otherPayload, err := json.Marshal(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherResponse := postWorkerJSON(t, workerURL+"/v1/tasks", otherPayload)
+	if otherResponse.StatusCode != http.StatusConflict {
+		t.Fatalf("different task reused an unfenced workspace: status %d", otherResponse.StatusCode)
+	}
 	stopCodexProcess(worker)
 	logData, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Count(string(logData), `"method":"turn/start"`); got != 1 {
+	if got := strings.Count(string(logData), "turn/start\n"); got != 1 {
 		t.Fatalf("fixture saw %d turn/start calls, want 1", got)
 	}
 }
@@ -171,13 +181,14 @@ func TestApprovalIsBlockedAndCannotBeRelayed(t *testing.T) {
 
 func TestCancellationIsScopedToOneTask(t *testing.T) {
 	workspace := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "cancel-app-server.log")
 	if err := os.Mkdir(filepath.Join(workspace, "one"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Mkdir(filepath.Join(workspace, "two"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	worker, workerURL, _ := startCodexWorker(t, workspace, t.TempDir(), "CODEX_FAKE_MODE=hold")
+	worker, workerURL, _ := startCodexWorker(t, workspace, t.TempDir(), "CODEX_FAKE_MODE=hold", "CODEX_FAKE_LOG="+logPath)
 	defer stopCodexProcess(worker)
 	first := crossProcessTaskRequest("request-cancel-1", "task-cancel-1", "attempt-1", 1)
 	first.Workspace.Path = "one"
@@ -193,6 +204,7 @@ func TestCancellationIsScopedToOneTask(t *testing.T) {
 	}
 	waitForWorkerState(t, workerURL, first.TaskID, codexprotocol.StateRunning)
 	waitForWorkerState(t, workerURL, second.TaskID, codexprotocol.StateRunning)
+	waitForLogEntry(t, logPath, "turn/start")
 	cancelPayload, _ := json.Marshal(first.Mutation)
 	cancel := postWorkerJSON(t, workerURL+"/v1/tasks/"+first.TaskID+"/cancel", cancelPayload)
 	if cancel.StatusCode != http.StatusAccepted {
@@ -203,6 +215,25 @@ func TestCancellationIsScopedToOneTask(t *testing.T) {
 	if state.State != codexprotocol.StateRunning && state.State != codexprotocol.StateStarting {
 		t.Fatalf("second task changed after first cancellation: %s", state.State)
 	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(logData, []byte("turn/interrupt")) {
+		t.Fatalf("cancellation did not issue native turn/interrupt: %s", logData)
+	}
+}
+
+func waitForLogEntry(t *testing.T, path, entry string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if data, err := os.ReadFile(path); err == nil && bytes.Contains(data, []byte(entry)) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("fixture log %s did not contain %q", path, entry)
 }
 
 func TestUnsafeWorkspacePathsAreRejectedBeforeChildStart(t *testing.T) {
@@ -220,7 +251,7 @@ func TestUnsafeWorkspacePathsAreRejectedBeforeChildStart(t *testing.T) {
 			t.Fatalf("path %q returned %d", path, response.StatusCode)
 		}
 	}
-	if data, err := os.ReadFile(logPath); err == nil && bytes.Contains(data, []byte(`"method":"turn/start"`)) {
+	if data, err := os.ReadFile(logPath); err == nil && bytes.Contains(data, []byte("turn/start")) {
 		t.Fatal("unsafe workspace request started an app-server turn")
 	}
 }
@@ -238,7 +269,7 @@ func startCodexWorker(t *testing.T, workspace, state string, environment ...stri
 	t.Helper()
 	port := freeCodexPort(t)
 	logPath := filepath.Join(t.TempDir(), "worker.log")
-	args := []string{"--workspace-root", workspace, "--state-root", state, "--codex-bin", fakeCodexBin, "--listen", "127.0.0.1:" + strconv.Itoa(port)}
+	args := []string{"--workspace-root", workspace, "--state-root", state, "--codex-bin", fakeCodexBin, "--max-concurrency", "2", "--listen", "127.0.0.1:" + strconv.Itoa(port)}
 	cmd := exec.Command(workerBin, args...)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr

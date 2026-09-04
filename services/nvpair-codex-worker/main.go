@@ -24,6 +24,7 @@ func main() {
 	workspaceRoot := flag.String("workspace-root", "", "required absolute Worker workspace root")
 	stateRoot := flag.String("state-root", "", "durable Worker state directory")
 	codexBin := flag.String("codex-bin", "codex", "Codex executable")
+	maxConcurrency := flag.Int("max-concurrency", 1, "maximum number of active task leases")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
@@ -33,6 +34,12 @@ func main() {
 	}
 	if *workspaceRoot == "" {
 		log.Fatal("--workspace-root is required")
+	}
+	if err := validateLoopbackListen(*listen); err != nil {
+		log.Fatal(err)
+	}
+	if *maxConcurrency <= 0 {
+		log.Fatal("--max-concurrency must be positive")
 	}
 
 	policy, err := NewWorkspacePolicy(*workspaceRoot)
@@ -56,12 +63,7 @@ func main() {
 		log.Fatalf("task store: %v", err)
 	}
 
-	worker := &workerHTTPServer{
-		store:   store,
-		factory: NewAppServerFactory(*codexBin),
-		policy:  policy,
-		active:  make(map[string]*taskRun),
-	}
+	worker := NewServerWithCapacity(store, NewAppServerFactory(*codexBin), policy, *maxConcurrency).(*workerHTTPServer)
 	httpServer := &http.Server{Handler: worker}
 	listener, err := net.Listen("tcp", *listen)
 	if err != nil {
@@ -86,4 +88,16 @@ func main() {
 		}
 	}
 	_ = store.Close()
+}
+
+func validateLoopbackListen(address string) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("--listen must be host:port: %w", err)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("--listen must use a loopback address, got %q", host)
+	}
+	return nil
 }

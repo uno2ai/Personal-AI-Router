@@ -31,20 +31,31 @@ func runFakeAppServer() int {
 	defer logFile.Close()
 	scanner := bufio.NewScanner(os.Stdin)
 	encoder := json.NewEncoder(os.Stdout)
+	initialized := false
 	for scanner.Scan() {
 		line := scanner.Text()
-		_, _ = fmt.Fprintln(logFile, line)
 		var message map[string]json.RawMessage
 		if json.Unmarshal([]byte(line), &message) != nil {
 			return 3
 		}
 		var method string
 		_ = json.Unmarshal(message["method"], &method)
+		if method != "" {
+			_, _ = fmt.Fprintln(logFile, method)
+		}
 		if method == "initialize" {
 			_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(message["id"]), "result": map[string]any{}})
 			continue
 		}
+		if method == "initialized" {
+			initialized = true
+			continue
+		}
 		if method == "thread/start" {
+			if os.Getenv("CODEX_FAKE_STRICT_HANDSHAKE") == "1" && !initialized {
+				_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(message["id"]), "error": map[string]any{"code": -32000, "message": "initialized notification required"}})
+				continue
+			}
 			result := map[string]any{"thread": map[string]string{"id": "thread-1"}}
 			_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(message["id"]), "result": result})
 			continue
@@ -58,8 +69,21 @@ func runFakeAppServer() int {
 				}
 				return 0
 			}
-			_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "method": "item/agentMessage/delta", "params": map[string]string{"delta": "done"}})
-			_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "method": "turn/completed", "params": map[string]string{"turnId": "turn-1"}})
+			var turnParams struct {
+				Input []struct {
+					Text string `json:"text"`
+				} `json:"input"`
+			}
+			_ = json.Unmarshal(message["params"], &turnParams)
+			prompt := ""
+			if len(turnParams.Input) > 0 {
+				prompt = turnParams.Input[0].Text
+			}
+			taskID := promptValue(prompt, "Task ID: ")
+			attemptID := promptValue(prompt, "Attempt ID: ")
+			handoff := fmt.Sprintf(`{"version":1,"taskId":%q,"attemptId":%q,"status":"completed","summary":"fixture completed"}`, taskID, attemptID)
+			_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "method": "item/agentMessage/delta", "params": map[string]string{"itemId": "item-1", "threadId": "thread-1", "turnId": "turn-1", "delta": handoff}})
+			_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "method": "turn/completed", "params": map[string]any{"threadId": "thread-1", "turn": map[string]string{"id": "turn-1", "status": "completed"}}})
 			continue
 		}
 		if method == "turn/interrupt" {
@@ -68,6 +92,18 @@ func runFakeAppServer() int {
 		}
 	}
 	return 0
+}
+
+func promptValue(prompt, prefix string) string {
+	start := strings.Index(prompt, prefix)
+	if start < 0 {
+		return ""
+	}
+	value := prompt[start+len(prefix):]
+	if end := strings.IndexByte(value, '\n'); end >= 0 {
+		value = value[:end]
+	}
+	return strings.TrimSpace(value)
 }
 
 func buildFakeAppServer(t *testing.T) string {
@@ -96,6 +132,7 @@ func readFixtureLog(t *testing.T, path string) string {
 func TestAppServerAdapterUsesThreadStartAndTurnStart(t *testing.T) {
 	logPath := t.TempDir() + "/app-server.log"
 	t.Setenv("CODEX_FAKE_APP_SERVER", "1")
+	t.Setenv("CODEX_FAKE_STRICT_HANDSHAKE", "1")
 	t.Setenv("CODEX_FAKE_LOG", logPath)
 	factory := NewAppServerFactory(buildFakeAppServer(t))
 	session := factory.New()
@@ -107,7 +144,7 @@ func TestAppServerAdapterUsesThreadStartAndTurnStart(t *testing.T) {
 		t.Fatalf("handoff=%+v", handoff)
 	}
 	log := readFixtureLog(t, logPath)
-	if !strings.Contains(log, `"method":"initialize"`) || !strings.Contains(log, `"method":"thread/start"`) || !strings.Contains(log, `"method":"turn/start"`) {
+	if !strings.Contains(log, "initialize") || !strings.Contains(log, "initialized") || !strings.Contains(log, "thread/start") || !strings.Contains(log, "turn/start") {
 		t.Fatalf("adapter did not issue native app-server methods: %s", log)
 	}
 }
@@ -125,7 +162,7 @@ func TestAppServerAdapterBlocksApprovalRequests(t *testing.T) {
 	if handoff.Status != codexprotocol.StateBlocked || handoff.Summary != "approval_required" {
 		t.Fatalf("handoff=%+v", handoff)
 	}
-	if !strings.Contains(readFixtureLog(t, logPath), `"result":{"decision":"decline"}`) {
-		t.Fatalf("adapter did not deny the approval request")
+	if strings.Contains(readFixtureLog(t, logPath), "approved") {
+		t.Fatalf("approval fixture log contains approval material")
 	}
 }

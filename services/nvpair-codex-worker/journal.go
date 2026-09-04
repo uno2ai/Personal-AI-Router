@@ -4,13 +4,12 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"nvpair-shared/codexprotocol"
@@ -19,18 +18,20 @@ import (
 const journalVersion = 1
 
 type journalEntry struct {
-	Version     int                      `json:"version"`
-	Sequence    uint64                   `json:"sequence"`
-	Kind        string                   `json:"kind"`
-	RequestID   string                   `json:"requestId"`
-	RequestHash string                   `json:"requestHash,omitempty"`
-	Record      codexprotocol.TaskRecord `json:"record"`
-	Event       *codexprotocol.TaskEvent `json:"event,omitempty"`
+	Version      int                      `json:"version"`
+	Sequence     uint64                   `json:"sequence"`
+	Kind         string                   `json:"kind"`
+	RequestID    string                   `json:"requestId"`
+	RequestHash  string                   `json:"requestHash,omitempty"`
+	MutationHash string                   `json:"mutationHash,omitempty"`
+	Record       codexprotocol.TaskRecord `json:"record"`
+	Event        *codexprotocol.TaskEvent `json:"event,omitempty"`
 }
 
 type Journal struct {
 	mu       sync.Mutex
 	file     *os.File
+	lockFile *os.File
 	path     string
 	sequence uint64
 	closed   bool
@@ -43,13 +44,19 @@ func NewJournal(path string) (*Journal, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("create journal directory: %w", err)
 	}
+	lockFile, err := acquireJournalLock(path)
+	if err != nil {
+		return nil, err
+	}
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
+		_ = releaseJournalLock(lockFile)
 		return nil, fmt.Errorf("open journal: %w", err)
 	}
 	entries, err := readJournal(path)
 	if err != nil {
 		_ = file.Close()
+		_ = releaseJournalLock(lockFile)
 		return nil, err
 	}
 	var sequence uint64
@@ -58,7 +65,7 @@ func NewJournal(path string) (*Journal, error) {
 			sequence = entry.Sequence
 		}
 	}
-	return &Journal{file: file, path: path, sequence: sequence}, nil
+	return &Journal{file: file, lockFile: lockFile, path: path, sequence: sequence}, nil
 }
 
 func (j *Journal) Append(entry journalEntry) error {
@@ -106,23 +113,38 @@ func (j *Journal) Close() error {
 		_ = j.file.Close()
 		return err
 	}
-	return j.file.Close()
+	err := j.file.Close()
+	if lockErr := releaseJournalLock(j.lockFile); err == nil {
+		err = lockErr
+	}
+	return err
 }
 
 func readJournal(path string) ([]journalEntry, error) {
-	file, err := os.Open(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read journal: %w", err)
 	}
-	defer file.Close()
 
 	var entries []journalEntry
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
 	var previous uint64
-	for scanner.Scan() {
+	lines := strings.Split(string(data), "\n")
+	for index, line := range lines {
+		if line == "" && index == len(lines)-1 {
+			continue
+		}
 		var entry journalEntry
-		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			// A process can die after writing a partial final JSONL record but
+			// before the newline reaches durable storage. Earlier records are
+			// already fsync'd, so only that demonstrably incomplete tail may be
+			// ignored. A malformed newline-terminated record remains fatal.
+			if index == len(lines)-1 && !strings.HasSuffix(string(data), "\n") && strings.Contains(err.Error(), "unexpected end of JSON input") {
+				if truncateErr := os.Truncate(path, int64(strings.LastIndexByte(string(data), '\n')+1)); truncateErr != nil {
+					return nil, fmt.Errorf("repair incomplete journal tail: %w", truncateErr)
+				}
+				break
+			}
 			return nil, fmt.Errorf("decode journal entry: %w", err)
 		}
 		if entry.Version != journalVersion {
@@ -133,9 +155,6 @@ func readJournal(path string) ([]journalEntry, error) {
 		}
 		previous = entry.Sequence
 		entries = append(entries, entry)
-	}
-	if err := scanner.Err(); err != nil && !errors.Is(err, io.EOF) {
-		return nil, fmt.Errorf("scan journal: %w", err)
 	}
 	return entries, nil
 }

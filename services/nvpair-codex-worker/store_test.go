@@ -147,3 +147,76 @@ func TestTaskIDCannotBeReusedUntilExplicitlyFenced(t *testing.T) {
 		t.Fatalf("expected fenced retry, duplicate=%v err=%v", duplicate, err)
 	}
 }
+
+func TestEventSequenceAndMetadataSurviveReplay(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "tasks.jsonl")
+	store := mustOpenStore(t, path)
+	request := validTaskRequest("r-seq", "t-seq", "a-seq", 1)
+	if _, _, err := store.Accept(request); err != nil {
+		t.Fatal(err)
+	}
+	mutation := request.Mutation
+	mutation.RequestID = "r-seq-1"
+	if err := store.MutateEvent(mutation, "progress", map[string]string{"source": "fixture"}, func(record *codexprotocol.TaskRecord) error {
+		record.State = codexprotocol.StateRunning
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	mutation.RequestID = "r-seq-2"
+	if err := store.MutateEvent(mutation, "progress", map[string]string{"source": "fixture-2"}, func(record *codexprotocol.TaskRecord) error {
+		record.State = codexprotocol.StateRunning
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	events := store.Events(request.TaskID, 1)
+	if len(events) != 1 || events[0].Seq != 2 || events[0].Metadata["source"] != "fixture-2" {
+		t.Fatalf("events after sequence: %+v", events)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	replayed := mustOpenStore(t, path)
+	replayedEvents := replayed.Events(request.TaskID, 0)
+	if len(replayedEvents) != 3 || replayedEvents[1].Seq != 2 || replayedEvents[2].Kind != "restart_reconciled" {
+		t.Fatalf("replayed events: %+v", replayedEvents)
+	}
+}
+
+func TestMutationRequestIDReuseWithDifferentTupleConflicts(t *testing.T) {
+	store := newTestStore(t)
+	request := validTaskRequest("r-mutation", "t-mutation", "a-mutation", 1)
+	if _, _, err := store.Accept(request); err != nil {
+		t.Fatal(err)
+	}
+	mutation := request.Mutation
+	mutation.RequestID = "same-request"
+	if err := store.Mutate(mutation, func(record *codexprotocol.TaskRecord) error {
+		record.State = codexprotocol.StateRunning
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	mutation.TaskID = "other-task"
+	if err := store.Mutate(mutation, func(record *codexprotocol.TaskRecord) error { return nil }); !errors.Is(err, ErrRequestConflict) {
+		t.Fatalf("expected mutation request conflict, got %v", err)
+	}
+}
+
+func TestCapacityAndCanonicalWorkspaceAreEnforcedAtomically(t *testing.T) {
+	store := newTestStore(t)
+	first := validTaskRequest("r-cap-1", "t-cap-1", "a-cap-1", 1)
+	second := validTaskRequest("r-cap-2", "t-cap-2", "a-cap-2", 1)
+	if _, _, err := store.AcceptAt(first, "/canonical/workspace", 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.AcceptAt(second, "/canonical/workspace/./", 1); !errors.Is(err, ErrWorkspaceBusy) {
+		t.Fatalf("expected canonical workspace conflict, got %v", err)
+	}
+	third := validTaskRequest("r-cap-3", "t-cap-3", "a-cap-3", 1)
+	if _, _, err := store.AcceptAt(third, "/another/workspace", 1); !errors.Is(err, ErrCapacity) {
+		t.Fatalf("expected capacity conflict, got %v", err)
+	}
+}

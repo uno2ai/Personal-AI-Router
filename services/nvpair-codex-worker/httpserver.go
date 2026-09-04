@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -35,20 +36,29 @@ type taskRun struct {
 }
 
 type workerHTTPServer struct {
-	store   *TaskStore
-	factory AppServerFactory
-	policy  WorkspacePolicy
+	store          *TaskStore
+	factory        AppServerFactory
+	policy         WorkspacePolicy
+	maxConcurrency int
 
 	mu     sync.Mutex
 	active map[string]*taskRun
 }
 
 func NewServer(store *TaskStore, factory AppServerFactory, policy WorkspacePolicy) http.Handler {
+	return NewServerWithCapacity(store, factory, policy, 1)
+}
+
+func NewServerWithCapacity(store *TaskStore, factory AppServerFactory, policy WorkspacePolicy, maxConcurrency int) http.Handler {
+	if maxConcurrency <= 0 {
+		maxConcurrency = 1
+	}
 	return &workerHTTPServer{
-		store:   store,
-		factory: factory,
-		policy:  policy,
-		active:  make(map[string]*taskRun),
+		store:          store,
+		factory:        factory,
+		policy:         policy,
+		maxConcurrency: maxConcurrency,
+		active:         make(map[string]*taskRun),
 	}
 }
 
@@ -60,8 +70,8 @@ func (s *workerHTTPServer) Close() {
 	}
 	s.mu.Unlock()
 	for _, run := range runs {
-		run.cancel()
 		run.session.Cancel()
+		run.cancel()
 	}
 }
 
@@ -85,7 +95,7 @@ func (s *workerHTTPServer) handleWorker(w http.ResponseWriter) {
 		"capabilities": map[string]any{
 			"os":             runtime.GOOS,
 			"architecture":   runtime.GOARCH,
-			"maxConcurrency": 1,
+			"maxConcurrency": s.maxConcurrency,
 		},
 	})
 }
@@ -106,7 +116,7 @@ func (s *workerHTTPServer) handleCreate(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	record, idempotent, err := s.store.Accept(request)
+	record, idempotent, err := s.store.AcceptAt(request, cwd, s.maxConcurrency)
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -196,7 +206,7 @@ func (s *workerHTTPServer) handleCancel(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	var mutation codexprotocol.Mutation
-	if err := json.Unmarshal(payload, &mutation); err != nil {
+	if err := decodeSingleJSON(payload, &mutation); err != nil {
 		writeError(w, http.StatusBadRequest, "decode cancellation: "+err.Error())
 		return
 	}
@@ -221,15 +231,34 @@ func (s *workerHTTPServer) handleCancel(w http.ResponseWriter, r *http.Request, 
 	run := s.active[taskID]
 	s.mu.Unlock()
 	if run != nil {
-		run.cancel()
 		run.session.Cancel()
+		// RunWithChild observes ctx cancellation by sending turn/interrupt and
+		// only then closing the process; it no longer uses CommandContext's
+		// immediate kill path.
+		run.cancel()
 	}
 	record, _ := s.store.Get(taskID)
 	writeJSON(w, http.StatusAccepted, record)
 }
 
+func decodeSingleJSON(payload []byte, target any) error {
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return errors.New("multiple JSON values")
+		}
+		return err
+	}
+	return nil
+}
+
 func (s *workerHTTPServer) runTask(request codexprotocol.TaskRequest, record codexprotocol.TaskRecord, cwd string) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(request.Context.Limits.WallSeconds)*time.Second)
 	session := s.factory.New()
 	s.mu.Lock()
 	s.active[record.TaskID] = &taskRun{session: session, cancel: cancel}
@@ -241,32 +270,71 @@ func (s *workerHTTPServer) runTask(request codexprotocol.TaskRequest, record cod
 		cancel()
 	}()
 
-	_ = s.transition(record.Mutation, codexprotocol.StateStarting, "start")
-	_ = s.transition(record.Mutation, codexprotocol.StateRunning, "run")
+	if err := s.transition(record.Mutation, codexprotocol.StateStarting, "start"); err != nil {
+		return
+	}
+	if err := s.transition(record.Mutation, codexprotocol.StateRunning, "run"); err != nil {
+		return
+	}
 	runtimeRequest := request
-	runtimeRequest.Workspace.Path = cwd
-	handoff, err := session.Run(ctx, runtimeRequest, func(event codexprotocol.TaskEvent) {
+	verifiedCWD, err := s.policy.Resolve(request.Workspace)
+	if err != nil || verifiedCWD != cwd {
+		// The path is revalidated immediately before child creation to narrow
+		// the filesystem check/use window. No task is started on drift.
+		handoff := codexprotocol.Handoff{Version: codexprotocol.HandoffVersion, TaskID: record.TaskID, AttemptID: record.AttemptID, Status: codexprotocol.StateLost, Summary: "workspace changed before execution"}
+		mutation := record.Mutation
+		mutation.RequestID = record.RequestID + ":workspace-drift"
+		_ = s.store.Mutate(mutation, func(current *codexprotocol.TaskRecord) error {
+			current.State = codexprotocol.StateLost
+			current.Handoff = &handoff
+			return nil
+		})
+		return
+	}
+	runtimeRequest.Workspace.Path = verifiedCWD
+	var eventNumber uint64
+	var persistenceErr error
+	handoff, err := session.RunWithChild(ctx, runtimeRequest, func(event codexprotocol.TaskEvent) {
 		if event.State.Terminal() {
 			return
 		}
 		mutation := record.Mutation
-		mutation.RequestID = fmt.Sprintf("%s:event-%d", record.RequestID, time.Now().UnixNano())
-		_ = s.store.Mutate(mutation, func(current *codexprotocol.TaskRecord) error {
+		eventNumber++
+		mutation.RequestID = fmt.Sprintf("%s:event-%d", record.RequestID, eventNumber)
+		if err := s.store.MutateEvent(mutation, event.Kind, event.Metadata, func(current *codexprotocol.TaskRecord) error {
 			current.State = event.State
+			return nil
+		}); err != nil && persistenceErr == nil {
+			persistenceErr = err
+			// Stop producing side effects as soon as durable event persistence
+			// fails; the terminal record will remain fenced/lost if it cannot be
+			// written either.
+			session.Cancel()
+		}
+	}, func(identity string) error {
+		mutation := record.Mutation
+		mutation.RequestID = record.RequestID + ":child"
+		return s.store.Mutate(mutation, func(current *codexprotocol.TaskRecord) error {
+			current.ChildIdentity = identity
 			return nil
 		})
 	})
+	if persistenceErr != nil {
+		err = fmt.Errorf("persist Worker event: %w", persistenceErr)
+	}
 	if err != nil {
-		state := codexprotocol.StateFailed
+		state := codexprotocol.StateLost
 		if errors.Is(err, context.Canceled) {
 			state = codexprotocol.StateCancelled
+		} else if errors.Is(err, context.DeadlineExceeded) {
+			state = codexprotocol.StateFailed
 		}
 		handoff = codexprotocol.Handoff{
 			Version:   codexprotocol.HandoffVersion,
 			TaskID:    record.TaskID,
 			AttemptID: record.AttemptID,
 			Status:    state,
-			Summary:   "app-server failed",
+			Summary:   "app-server execution did not produce a verified handoff",
 		}
 	}
 	if err := handoff.Validate(record.TaskID, record.AttemptID); err != nil {
@@ -280,11 +348,15 @@ func (s *workerHTTPServer) runTask(request codexprotocol.TaskRequest, record cod
 	}
 	mutation := record.Mutation
 	mutation.RequestID = fmt.Sprintf("%s:terminal", record.RequestID)
-	_ = s.store.Mutate(mutation, func(current *codexprotocol.TaskRecord) error {
+	if err := s.store.Mutate(mutation, func(current *codexprotocol.TaskRecord) error {
 		current.State = handoff.Status
 		current.Handoff = &handoff
 		return nil
-	})
+	}); err != nil {
+		// A journal failure must not be hidden: the last durable record remains
+		// the source of truth and its lease stays held until an explicit fence.
+		return
+	}
 }
 
 func (s *workerHTTPServer) transition(mutation codexprotocol.Mutation, state codexprotocol.TaskState, suffix string) error {

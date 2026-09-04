@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
 	"strings"
 	"time"
@@ -198,6 +199,12 @@ func (r TaskRequest) Validate() error {
 	if err := r.Execution.Validate(); err != nil {
 		return err
 	}
+	if r.Workspace.Mode == "read" && r.Execution.Sandbox != "read-only" {
+		return errors.New("read workspace requires read-only sandbox")
+	}
+	if r.Workspace.Mode == "write" && r.Execution.Sandbox != "workspace-write" {
+		return errors.New("write workspace requires workspace-write sandbox")
+	}
 	return nil
 }
 
@@ -210,6 +217,13 @@ func DecodeTaskRequest(payload []byte) (TaskRequest, error) {
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&request); err != nil {
 		return TaskRequest{}, fmt.Errorf("decode task request: %w", err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return TaskRequest{}, errors.New("decode task request: multiple JSON values")
+		}
+		return TaskRequest{}, fmt.Errorf("decode task request: trailing data: %w", err)
 	}
 	if err := request.Validate(); err != nil {
 		return TaskRequest{}, err

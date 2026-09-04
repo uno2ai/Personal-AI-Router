@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -35,9 +36,23 @@ func NewHTTPWorkerClient(rawURL string) (*HTTPWorkerClient, error) {
 	if err != nil || parsed.Scheme != "http" || parsed.Host == "" {
 		return nil, errors.New("worker URL must be an absolute http URL")
 	}
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return nil, errors.New("worker URL must not contain credentials or query data")
+	}
+	host := parsed.Hostname()
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return nil, errors.New("Worker URL must use a literal loopback address")
+	}
 	return &HTTPWorkerClient{
 		baseURL: strings.TrimRight(parsed.String(), "/"),
-		http:    &http.Client{Timeout: 30 * time.Second},
+		http: &http.Client{
+			Timeout:   30 * time.Second,
+			Transport: &http.Transport{Proxy: nil},
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 	}, nil
 }
 
@@ -94,7 +109,10 @@ func (c *HTTPWorkerClient) do(ctx context.Context, method, path string, body []b
 		return nil, errors.New("Worker response exceeds 256 KiB")
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return nil, fmt.Errorf("Worker returned HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(data)))
+		return nil, fmt.Errorf("Worker returned HTTP %d", response.StatusCode)
+	}
+	if !json.Valid(data) {
+		return nil, errors.New("Worker returned invalid JSON")
 	}
 	return json.RawMessage(data), nil
 }

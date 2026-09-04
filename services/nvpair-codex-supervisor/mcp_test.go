@@ -16,6 +16,8 @@ import (
 
 type fakeWorkerClient struct{}
 
+type leakyWorkerClient struct{}
+
 func (fakeWorkerClient) Worker(context.Context) (json.RawMessage, error) {
 	return json.RawMessage(`{"protocolVersion":1,"version":"test"}`), nil
 }
@@ -29,11 +31,27 @@ func (fakeWorkerClient) Status(context.Context, string) (json.RawMessage, error)
 }
 
 func (fakeWorkerClient) Result(context.Context, string) (json.RawMessage, error) {
-	return json.RawMessage(`{"handoff":{"taskId":"task-1","status":"completed","summary":"done"}}`), nil
+	return json.RawMessage(`{"record":{"taskId":"task-1","attemptId":"attempt-1"},"handoff":{"version":1,"taskId":"task-1","attemptId":"attempt-1","status":"completed","summary":"done"}}`), nil
 }
 
 func (fakeWorkerClient) Cancel(context.Context, codexprotocol.Mutation) (json.RawMessage, error) {
 	return json.RawMessage(`{"taskId":"task-1","state":"cancelling"}`), nil
+}
+
+func (leakyWorkerClient) Worker(context.Context) (json.RawMessage, error) {
+	return json.RawMessage(`{"protocolVersion":1,"version":"test","capabilities":{"os":"darwin","architecture":"arm64","maxConcurrency":1},"prompt":"secret"}`), nil
+}
+func (leakyWorkerClient) Create(context.Context, codexprotocol.TaskRequest) (json.RawMessage, error) {
+	return json.RawMessage(`{"record":{"taskId":"task-1","state":"accepted"},"idempotent":false,"prompt":"secret"}`), nil
+}
+func (leakyWorkerClient) Status(context.Context, string) (json.RawMessage, error) {
+	return json.RawMessage(`{"taskId":"task-1","state":"running","response":"secret"}`), nil
+}
+func (leakyWorkerClient) Result(context.Context, string) (json.RawMessage, error) {
+	return json.RawMessage(`{"record":{"taskId":"task-1"},"handoff":{"status":"completed","summary":"done"},"transcript":"secret"}`), nil
+}
+func (leakyWorkerClient) Cancel(context.Context, codexprotocol.Mutation) (json.RawMessage, error) {
+	return json.RawMessage(`{"taskId":"task-1","state":"cancelling","source":"secret"}`), nil
 }
 
 func callMCP(t *testing.T, server *MCPServer, request string) json.RawMessage {
@@ -126,5 +144,13 @@ func TestUnknownMCPMethodReturnsMethodNotFound(t *testing.T) {
 	}
 	if response.Error.Code != -32601 {
 		t.Fatalf("error code=%d, want -32601", response.Error.Code)
+	}
+}
+
+func TestWorkerResponsesAreWhitelistedBeforeMCPExposure(t *testing.T) {
+	server := NewMCPServer(leakyWorkerClient{})
+	result := callMCP(t, server, `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"workers.list","arguments":{}}}`)
+	if strings.Contains(responseText(t, result), "secret") {
+		t.Fatal("untrusted Worker response field crossed the MCP boundary")
 	}
 }

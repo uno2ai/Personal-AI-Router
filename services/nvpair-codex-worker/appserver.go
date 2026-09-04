@@ -42,29 +42,46 @@ func (f AppServerFactory) New() *AppServerSession {
 type AppServerSession struct {
 	binary string
 
-	mu     sync.Mutex
-	cancel context.CancelFunc
-	peer   *jsonrpc.Peer
+	mu            sync.Mutex
+	peer          *jsonrpc.Peer
+	process       *os.Process
+	cancelRequest chan struct{}
+	cancelOnce    *sync.Once
 }
 
 func (s *AppServerSession) Run(ctx context.Context, request codexprotocol.TaskRequest, emit func(codexprotocol.TaskEvent)) (codexprotocol.Handoff, error) {
+	return s.RunWithChild(ctx, request, emit, nil)
+}
+
+func (s *AppServerSession) RunWithChild(ctx context.Context, request codexprotocol.TaskRequest, emit func(codexprotocol.TaskEvent), onChild func(string) error) (codexprotocol.Handoff, error) {
 	cwd, err := appServerCWD(request.Workspace.Path)
 	if err != nil {
 		return codexprotocol.Handoff{}, err
 	}
-	childCtx, cancel := context.WithCancel(ctx)
 	s.mu.Lock()
-	s.cancel = cancel
+	s.cancelRequest = make(chan struct{}, 1)
+	cancelRequest := s.cancelRequest
+	s.cancelOnce = &sync.Once{}
 	s.mu.Unlock()
+	callCtx, cancelCalls := context.WithCancel(ctx)
+	defer cancelCalls()
+	go func() {
+		select {
+		case <-cancelRequest:
+			cancelCalls()
+		case <-callCtx.Done():
+		}
+	}()
 	defer func() {
 		s.mu.Lock()
-		s.cancel = nil
 		s.peer = nil
+		s.process = nil
+		s.cancelRequest = nil
+		s.cancelOnce = nil
 		s.mu.Unlock()
-		cancel()
 	}()
 
-	cmd := exec.CommandContext(childCtx, s.binary, "app-server", "--listen", "stdio://")
+	cmd := exec.Command(s.binary, "app-server", "--listen", "stdio://")
 	cmd.Dir = cwd
 	cmd.Stderr = io.Discard
 	stdin, err := cmd.StdinPipe()
@@ -80,6 +97,16 @@ func (s *AppServerSession) Run(ctx context.Context, request codexprotocol.TaskRe
 		_ = stdin.Close()
 		return codexprotocol.Handoff{}, fmt.Errorf("start app-server: %w", err)
 	}
+	s.mu.Lock()
+	s.process = cmd.Process
+	s.mu.Unlock()
+	if onChild != nil {
+		if err := onChild(fmt.Sprintf("pid:%d", cmd.Process.Pid)); err != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			return codexprotocol.Handoff{}, fmt.Errorf("persist app-server child identity: %w", err)
+		}
+	}
 	waitCh := make(chan error, 1)
 	go func() { waitCh <- cmd.Wait() }()
 
@@ -88,30 +115,33 @@ func (s *AppServerSession) Run(ctx context.Context, request codexprotocol.TaskRe
 	s.peer = peer
 	s.mu.Unlock()
 	approvalCh := make(chan struct{}, 1)
-	completedCh := make(chan struct{}, 1)
+	state := &appServerRunState{completedCh: make(chan turnResult, 1)}
 	serveDone := make(chan struct{})
 	go func() {
 		defer close(serveDone)
 		peer.Serve(func(message *jsonrpc.Message) {
 			s.handleServerRequest(peer, message, approvalCh, emit)
-		}, func(method string, _ json.RawMessage) {
-			s.handleNotification(method, completedCh, emit)
+		}, func(method string, params json.RawMessage) {
+			s.handleNotification(method, params, state, emit)
 		})
 	}()
 
-	if err := s.call(ctx, peer, "initialize", map[string]any{
+	if err := s.call(callCtx, peer, "initialize", map[string]any{
 		"clientInfo": map[string]string{"name": "nvpair-codex-worker", "version": Version},
 	}); err != nil {
-		return s.failedProcess(stdin, peer, waitCh, serveDone, err)
+		return s.failedProcess(cmd, stdin, peer, waitCh, serveDone, err)
 	}
-	threadResult, err := s.callResult(ctx, peer, "thread/start", map[string]any{
+	if err := peer.Notify("initialized", map[string]any{}); err != nil {
+		return s.failedProcess(cmd, stdin, peer, waitCh, serveDone, fmt.Errorf("app-server initialized: %w", err))
+	}
+	threadResult, err := s.callResult(callCtx, peer, "thread/start", map[string]any{
 		"cwd":            cwd,
 		"sandbox":        sandboxFor(request.Execution.Sandbox),
 		"approvalPolicy": "on-request",
 		"ephemeral":      true,
 	})
 	if err != nil {
-		return s.failedProcess(stdin, peer, waitCh, serveDone, err)
+		return s.failedProcess(cmd, stdin, peer, waitCh, serveDone, err)
 	}
 	var thread struct {
 		Thread struct {
@@ -119,17 +149,22 @@ func (s *AppServerSession) Run(ctx context.Context, request codexprotocol.TaskRe
 		} `json:"thread"`
 	}
 	if err := json.Unmarshal(threadResult, &thread); err != nil || thread.Thread.ID == "" {
-		return s.failedProcess(stdin, peer, waitCh, serveDone, errors.New("app-server thread/start returned no thread id"))
+		return s.failedProcess(cmd, stdin, peer, waitCh, serveDone, errors.New("app-server thread/start returned no thread id"))
 	}
-	turnResult, err := s.callResult(ctx, peer, "turn/start", map[string]any{
+	state.setThreadID(thread.Thread.ID)
+	turnResult, err := s.callResult(callCtx, peer, "turn/start", map[string]any{
 		"threadId": thread.Thread.ID,
 		"input": []map[string]string{{
 			"type": "text",
 			"text": turnPrompt(request),
 		}},
+		"cwd":            cwd,
+		"approvalPolicy": "on-request",
+		"sandboxPolicy":  sandboxPolicyFor(request.Execution.Sandbox, cwd),
+		"outputSchema":   handoffSchema(),
 	})
 	if err != nil {
-		return s.failedProcess(stdin, peer, waitCh, serveDone, err)
+		return s.failedProcess(cmd, stdin, peer, waitCh, serveDone, err)
 	}
 	var turn struct {
 		Turn struct {
@@ -137,21 +172,26 @@ func (s *AppServerSession) Run(ctx context.Context, request codexprotocol.TaskRe
 		} `json:"turn"`
 	}
 	if err := json.Unmarshal(turnResult, &turn); err != nil || turn.Turn.ID == "" {
-		return s.failedProcess(stdin, peer, waitCh, serveDone, errors.New("app-server turn/start returned no turn id"))
+		return s.failedProcess(cmd, stdin, peer, waitCh, serveDone, errors.New("app-server turn/start returned no turn id"))
 	}
+	state.setTurnID(turn.Turn.ID)
 
 	select {
-	case <-completedCh:
-		s.closeProcess(stdin, peer, serveDone, waitCh)
-		return codexprotocol.Handoff{
-			Version:   codexprotocol.HandoffVersion,
-			TaskID:    request.TaskID,
-			AttemptID: request.AttemptID,
-			Status:    codexprotocol.StateCompleted,
-			Summary:   "turn completed",
-		}, nil
+	case completed := <-state.completedCh:
+		s.closeProcess(cmd, stdin, peer, serveDone, waitCh)
+		if completed.err != nil {
+			return codexprotocol.Handoff{}, completed.err
+		}
+		var handoff codexprotocol.Handoff
+		if err := json.Unmarshal([]byte(completed.message), &handoff); err != nil {
+			return codexprotocol.Handoff{}, fmt.Errorf("app-server final message is not a handoff: %w", err)
+		}
+		if err := handoff.Validate(request.TaskID, request.AttemptID); err != nil {
+			return codexprotocol.Handoff{}, fmt.Errorf("validate app-server handoff: %w", err)
+		}
+		return handoff, nil
 	case <-approvalCh:
-		s.closeProcess(stdin, peer, serveDone, waitCh)
+		s.closeProcess(cmd, stdin, peer, serveDone, waitCh)
 		return codexprotocol.Handoff{
 			Version:   codexprotocol.HandoffVersion,
 			TaskID:    request.TaskID,
@@ -160,14 +200,11 @@ func (s *AppServerSession) Run(ctx context.Context, request codexprotocol.TaskRe
 			Summary:   "approval_required",
 		}, nil
 	case <-ctx.Done():
-		interruptCtx, interruptCancel := context.WithTimeout(context.Background(), time.Second)
-		_, _, _ = peer.Call(interruptCtx, "turn/interrupt", mustJSON(map[string]any{
-			"threadId": thread.Thread.ID,
-			"turnId":   turn.Turn.ID,
-		}))
-		interruptCancel()
-		s.closeProcess(stdin, peer, serveDone, waitCh)
+		s.interruptAndClose(ctx.Err(), cmd, stdin, peer, serveDone, waitCh, thread.Thread.ID, turn.Turn.ID)
 		return codexprotocol.Handoff{}, ctx.Err()
+	case <-cancelRequest:
+		s.interruptAndClose(context.Canceled, cmd, stdin, peer, serveDone, waitCh, thread.Thread.ID, turn.Turn.ID)
+		return codexprotocol.Handoff{}, context.Canceled
 	case err := <-waitCh:
 		peer.Close()
 		<-serveDone
@@ -177,10 +214,11 @@ func (s *AppServerSession) Run(ctx context.Context, request codexprotocol.TaskRe
 
 func (s *AppServerSession) Cancel() {
 	s.mu.Lock()
-	cancel := s.cancel
+	cancel := s.cancelRequest
+	once := s.cancelOnce
 	s.mu.Unlock()
-	if cancel != nil {
-		cancel()
+	if cancel != nil && once != nil {
+		once.Do(func() { close(cancel) })
 	}
 }
 
@@ -219,37 +257,142 @@ func (s *AppServerSession) handleServerRequest(peer *jsonrpc.Peer, message *json
 	_ = peer.RespondError(message.ID, -32601, "interactive app-server request is not supported")
 }
 
-func (s *AppServerSession) handleNotification(method string, completedCh chan<- struct{}, emit func(codexprotocol.TaskEvent)) {
+type appServerRunState struct {
+	mu          sync.Mutex
+	threadID    string
+	turnID      string
+	public      strings.Builder
+	completedCh chan turnResult
+}
+
+func (s *appServerRunState) setThreadID(id string) {
+	s.mu.Lock()
+	s.threadID = id
+	s.mu.Unlock()
+}
+
+func (s *appServerRunState) setTurnID(id string) {
+	s.mu.Lock()
+	s.turnID = id
+	s.mu.Unlock()
+}
+
+func (s *appServerRunState) turnIDValue() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.turnID
+}
+
+func (s *appServerRunState) ids() (string, string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.threadID, s.turnID
+}
+
+type turnResult struct {
+	message string
+	err     error
+}
+
+func (s *AppServerSession) handleNotification(method string, params json.RawMessage, state *appServerRunState, emit func(codexprotocol.TaskEvent)) {
+	currentThreadID, currentTurnID := state.ids()
 	switch method {
 	case "turn/completed":
 		emit(codexprotocol.TaskEvent{State: codexprotocol.StateCompleted, Kind: "turn_completed", At: time.Now().UTC()})
-		select {
-		case completedCh <- struct{}{}:
-		default:
+		var completed struct {
+			ThreadID string `json:"threadId"`
+			TurnID   string `json:"turnId"`
+			Turn     struct {
+				ID     string `json:"id"`
+				Status string `json:"status"`
+			} `json:"turn"`
 		}
+		if json.Unmarshal(params, &completed) != nil {
+			state.completedCh <- turnResult{err: errors.New("decode turn/completed notification")}
+			return
+		}
+		turnID := completed.TurnID
+		status := "completed"
+		if completed.Turn.ID != "" {
+			turnID = completed.Turn.ID
+			status = completed.Turn.Status
+		}
+		if completed.ThreadID != "" && completed.ThreadID != currentThreadID {
+			return
+		}
+		if turnID != "" && turnID != currentTurnID {
+			return
+		}
+		if status == "failed" || status == "interrupted" {
+			state.completedCh <- turnResult{err: fmt.Errorf("app-server turn %s", status)}
+			return
+		}
+		state.completedCh <- turnResult{message: strings.TrimSpace(state.public.String())}
 	case "item/agentMessage/delta", "item/commandExecution/outputDelta":
+		if method == "item/agentMessage/delta" {
+			var delta struct {
+				ThreadID string `json:"threadId"`
+				TurnID   string `json:"turnId"`
+				Delta    string `json:"delta"`
+			}
+			if json.Unmarshal(params, &delta) == nil && (delta.ThreadID == "" || delta.ThreadID == currentThreadID) && (delta.TurnID == "" || delta.TurnID == currentTurnID) {
+				if state.public.Len()+len(delta.Delta) <= codexprotocol.MaxHandoffBytes {
+					state.public.WriteString(delta.Delta)
+				}
+			}
+		}
 		emit(codexprotocol.TaskEvent{State: codexprotocol.StateRunning, Kind: "progress", Metadata: map[string]string{"source": method}, At: time.Now().UTC()})
 	case "error":
 		emit(codexprotocol.TaskEvent{State: codexprotocol.StateFailed, Kind: "app_server_error", At: time.Now().UTC()})
+		state.completedCh <- turnResult{err: errors.New("app-server emitted an error")}
 	}
 }
 
-func (s *AppServerSession) failedProcess(stdin io.WriteCloser, peer *jsonrpc.Peer, waitCh <-chan error, serveDone <-chan struct{}, err error) (codexprotocol.Handoff, error) {
-	s.closeProcess(stdin, peer, serveDone, waitCh)
+func (s *AppServerSession) failedProcess(cmd *exec.Cmd, stdin io.WriteCloser, peer *jsonrpc.Peer, waitCh <-chan error, serveDone <-chan struct{}, err error) (codexprotocol.Handoff, error) {
+	s.closeTransport(stdin, peer, serveDone)
+	if cmd.Process != nil {
+		_ = cmd.Process.Kill()
+	}
+	select {
+	case <-waitCh:
+	case <-time.After(time.Second):
+	}
 	return codexprotocol.Handoff{}, err
 }
 
-func (s *AppServerSession) closeProcess(stdin io.WriteCloser, peer *jsonrpc.Peer, serveDone <-chan struct{}, waitCh <-chan error) {
+func (s *AppServerSession) closeProcess(cmd *exec.Cmd, stdin io.WriteCloser, peer *jsonrpc.Peer, serveDone <-chan struct{}, waitCh <-chan error) {
+	s.closeTransport(stdin, peer, serveDone)
+	select {
+	case <-waitCh:
+	default:
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		select {
+		case <-waitCh:
+		case <-time.After(time.Second):
+		}
+	}
+}
+
+func (s *AppServerSession) closeTransport(stdin io.WriteCloser, peer *jsonrpc.Peer, serveDone <-chan struct{}) {
 	peer.Close()
 	_ = stdin.Close()
 	select {
 	case <-serveDone:
 	case <-time.After(time.Second):
 	}
-	select {
-	case <-waitCh:
-	case <-time.After(time.Second):
-	}
+}
+
+func (s *AppServerSession) interruptAndClose(reason error, cmd *exec.Cmd, stdin io.WriteCloser, peer *jsonrpc.Peer, serveDone <-chan struct{}, waitCh <-chan error, threadID, turnID string) {
+	interruptCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	_, _, _ = peer.Call(interruptCtx, "turn/interrupt", mustJSON(map[string]any{
+		"threadId": threadID,
+		"turnId":   turnID,
+	}))
+	cancel()
+	s.closeProcess(cmd, stdin, peer, serveDone, waitCh)
+	_ = reason
 }
 
 func appServerCWD(path string) (string, error) {
@@ -280,8 +423,33 @@ func sandboxFor(sandbox string) string {
 	return "read-only"
 }
 
+func sandboxPolicyFor(sandbox, cwd string) map[string]any {
+	if sandbox == "workspace-write" {
+		return map[string]any{"type": "workspaceWrite", "writableRoots": []string{cwd}}
+	}
+	return map[string]any{"type": "readOnly", "networkAccess": false}
+}
+
 func turnPrompt(request codexprotocol.TaskRequest) string {
-	return "Objective: " + request.Context.Objective + "\nRequired evidence: " + strings.Join(request.Context.RequiredEvidence, "; ")
+	return "You are a delegated Worker. Return only the JSON handoff object described below; do not include markdown or commentary.\n" +
+		"Task ID: " + request.TaskID + "\nAttempt ID: " + request.AttemptID + "\n" +
+		"Objective: " + request.Context.Objective +
+		"\nRelevant decisions: " + strings.Join(request.Context.RelevantDecisions, "; ") +
+		"\nConstraints: " + strings.Join(request.Context.Constraints, "; ") +
+		"\nRequired evidence: " + strings.Join(request.Context.RequiredEvidence, "; ") +
+		"\nHandoff status must be one of completed, blocked, failed, cancelled, or lost."
+}
+
+func handoffSchema() map[string]any {
+	return map[string]any{
+		"type": "object", "additionalProperties": false,
+		"properties": map[string]any{
+			"version": map[string]any{"type": "integer"}, "taskId": map[string]any{"type": "string"}, "attemptId": map[string]any{"type": "string"},
+			"status": map[string]any{"type": "string", "enum": []string{"completed", "blocked", "failed", "cancelled", "lost"}}, "summary": map[string]any{"type": "string"},
+			"findings": map[string]any{"type": "array"}, "changes": map[string]any{"type": "array"}, "verification": map[string]any{"type": "array"}, "artifacts": map[string]any{"type": "array"}, "recommendedNext": map[string]any{"type": "string"},
+		},
+		"required": []string{"version", "taskId", "attemptId", "status", "summary"},
+	}
 }
 
 func mustJSON(value any) json.RawMessage {
