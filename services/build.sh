@@ -4,7 +4,7 @@
 
 # build.sh — NVIDIA Personal AI Router build script for Linux and macOS.
 #
-# Mirrors build.bat. Reads versions.json with jq, builds the thirteen worker
+# Mirrors build.bat. Reads versions.json with jq, builds the fifteen worker
 # binaries with -X main.Version=... ldflags, then copies them into the
 # repo-root staging bundle at:
 #
@@ -68,6 +68,8 @@ V_BROKER=$( jq -r --arg k 'nvpair-ui-broker'    '.components[$k]' "$VERSIONS_FIL
 V_CLUMGR=$( jq -r --arg k 'nvpair-cluster-manager' '.components[$k]' "$VERSIONS_FILE")
 V_SCHED=$(  jq -r --arg k 'nvpair-job-scheduler' '.components[$k]' "$VERSIONS_FILE")
 V_TUI=$(    jq -r --arg k 'nvpair-tui'          '.components[$k]' "$VERSIONS_FILE")
+V_CODEX_WORKER=$(jq -r --arg k 'nvpair-codex-worker' '.components[$k]' "$VERSIONS_FILE")
+V_CODEX_SUPERVISOR=$(jq -r --arg k 'nvpair-codex-supervisor' '.components[$k]' "$VERSIONS_FILE")
 
 if [[ -z "$V_PRODUCT" || "$V_PRODUCT" == "null" ]]; then
     echo "ERROR: failed to parse versions.json" >&2
@@ -88,6 +90,8 @@ printf '  nvpair-ui-broker     = %s\n' "$V_BROKER"
 printf '  nvpair-cluster-mgr   = %s\n' "$V_CLUMGR"
 printf '  nvpair-job-scheduler = %s\n' "$V_SCHED"
 printf '  nvpair-tui           = %s\n' "$V_TUI"
+printf '  nvpair-codex-worker   = %s\n' "$V_CODEX_WORKER"
+printf '  nvpair-codex-supervisor = %s\n' "$V_CODEX_SUPERVISOR"
 echo
 
 echo "========================================"
@@ -97,7 +101,7 @@ echo
 
 build_subbinary() {
     local idx="$1" name="$2" version="$3"
-    echo "[$idx/13] Building $name (v$version)..."
+    echo "[$idx/15] Building $name (v$version)..."
     (cd "$ROOT/$name" && go build -ldflags "-X main.Version=$version" -o "$name" .)
     echo "      OK"
 }
@@ -114,6 +118,8 @@ build_subbinary 10 nvpair-ui-broker    "$V_BROKER"
 build_subbinary 11 nvpair-cluster-manager "$V_CLUMGR"
 build_subbinary 12 nvpair-job-scheduler   "$V_SCHED"
 build_subbinary 13 nvpair-tui            "$V_TUI"
+build_subbinary 14 nvpair-codex-worker   "$V_CODEX_WORKER"
+build_subbinary 15 nvpair-codex-supervisor "$V_CODEX_SUPERVISOR"
 
 BIN_OUT="$ROOT/build/bin"
 
@@ -143,6 +149,8 @@ cp "$ROOT/nvpair-ui-broker/nvpair-ui-broker"       "$BIN_OUT/nvpair-ui-broker"
 cp "$ROOT/nvpair-cluster-manager/nvpair-cluster-manager" "$BIN_OUT/nvpair-cluster-manager"
 cp "$ROOT/nvpair-job-scheduler/nvpair-job-scheduler" "$BIN_OUT/nvpair-job-scheduler"
 cp "$ROOT/nvpair-tui/nvpair-tui"                   "$BIN_OUT/nvpair-tui"
+cp "$ROOT/nvpair-codex-worker/nvpair-codex-worker" "$BIN_OUT/nvpair-codex-worker"
+cp "$ROOT/nvpair-codex-supervisor/nvpair-codex-supervisor" "$BIN_OUT/nvpair-codex-supervisor"
 
 echo
 echo "========================================"
@@ -162,4 +170,6 @@ printf '  UI Broker:    %s\n' "$BIN_OUT/nvpair-ui-broker"
 printf '  Cluster Mgr:  %s\n' "$BIN_OUT/nvpair-cluster-manager"
 printf '  Job Scheduler:%s\n' " $BIN_OUT/nvpair-job-scheduler"
 printf '  TUI:          %s\n' "$BIN_OUT/nvpair-tui"
+printf '  Codex Worker: %s\n' "$BIN_OUT/nvpair-codex-worker"
+printf '  Codex Supervisor: %s\n' "$BIN_OUT/nvpair-codex-supervisor"
 echo

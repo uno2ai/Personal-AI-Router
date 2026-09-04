@@ -51,6 +51,8 @@ for /f "delims=" %%V in ('jq -r --arg k "nvpair-engine-manager"   ".components[$
 for /f "delims=" %%V in ('jq -r --arg k "nvpair-cluster-manager"  ".components[$k]" "%VERSIONS_FILE%"')            do set "V_CLUMGR=%%V"
 for /f "delims=" %%V in ('jq -r --arg k "nvpair-job-scheduler"    ".components[$k]" "%VERSIONS_FILE%"')            do set "V_SCHED=%%V"
 for /f "delims=" %%V in ('jq -r --arg k "nvpair-tui"              ".components[$k]" "%VERSIONS_FILE%"')            do set "V_TUI=%%V"
+for /f "delims=" %%V in ('jq -r --arg k "nvpair-codex-worker"     ".components[$k]" "%VERSIONS_FILE%"')            do set "V_CODEX_WORKER=%%V"
+for /f "delims=" %%V in ('jq -r --arg k "nvpair-codex-supervisor" ".components[$k]" "%VERSIONS_FILE%"')            do set "V_CODEX_SUPERVISOR=%%V"
 
 if "%V_PRODUCT%"=="" (
     echo  ERROR: failed to parse versions.json
@@ -72,6 +74,8 @@ echo  nvpair-engine-manager= %V_ENGMGR%
 echo  nvpair-cluster-mgr   = %V_CLUMGR%
 echo  nvpair-job-scheduler = %V_SCHED%
 echo  nvpair-tui           = %V_TUI%
+echo  nvpair-codex-worker   = %V_CODEX_WORKER%
+echo  nvpair-codex-supervisor = %V_CODEX_SUPERVISOR%
 echo.
 
 echo ========================================
@@ -79,69 +83,79 @@ echo  Building all components
 echo ========================================
 echo.
 
-echo [1/13] Building ollama-proxy (v%V_PROXY%)...
+echo [1/15] Building ollama-proxy (v%V_PROXY%)...
 cd /d "%ROOT%ollama-proxy"
 go build -ldflags "-X main.Version=%V_PROXY%" -o ollama-proxy.exe . || goto :fail
 echo       OK
 
-echo [2/13] Building lmstudio-proxy (v%V_LMPROXY%)...
+echo [2/15] Building lmstudio-proxy (v%V_LMPROXY%)...
 cd /d "%ROOT%lmstudio-proxy"
 go build -ldflags "-X main.Version=%V_LMPROXY%" -o lmstudio-proxy.exe . || goto :fail
 echo       OK
 
-echo [3/13] Building nvpair-node-info (v%V_NINFO%)...
+echo [3/15] Building nvpair-node-info (v%V_NINFO%)...
 cd /d "%ROOT%nvpair-node-info"
 go build -ldflags "-X main.Version=%V_NINFO%" -o nvpair-node-info.exe . || goto :fail
 echo       OK
 
-echo [4/13] Building nvpair-node-scanner (v%V_NSCAN%)...
+echo [4/15] Building nvpair-node-scanner (v%V_NSCAN%)...
 cd /d "%ROOT%nvpair-node-scanner"
 go build -ldflags "-X main.Version=%V_NSCAN%" -o nvpair-node-scanner.exe . || goto :fail
 echo       OK
 
-echo [5/13] Building nvpair-manual-nodes (v%V_MNODES%)...
+echo [5/15] Building nvpair-manual-nodes (v%V_MNODES%)...
 cd /d "%ROOT%nvpair-manual-nodes"
 go build -ldflags "-X main.Version=%V_MNODES%" -o nvpair-manual-nodes.exe . || goto :fail
 echo       OK
 
-echo [6/13] Building nvpair-workload-manager (v%V_WLMGR%)...
+echo [6/15] Building nvpair-workload-manager (v%V_WLMGR%)...
 cd /d "%ROOT%nvpair-workload-manager"
 go build -ldflags "-X main.Version=%V_WLMGR%" -o nvpair-workload-manager.exe . || goto :fail
 echo       OK
 
-echo [7/13] Building nvpair-errors (v%V_ERRORS%)...
+echo [7/15] Building nvpair-errors (v%V_ERRORS%)...
 cd /d "%ROOT%nvpair-errors"
 go build -ldflags "-X main.Version=%V_ERRORS%" -o nvpair-errors.exe . || goto :fail
 echo       OK
 
-echo [8/13] Building nvpair-engine-manager (v%V_ENGMGR%)...
+echo [8/15] Building nvpair-engine-manager (v%V_ENGMGR%)...
 cd /d "%ROOT%nvpair-engine-manager"
 go build -ldflags "-X main.Version=%V_ENGMGR%" -o nvpair-engine-manager.exe . || goto :fail
 echo       OK
 
-echo [9/13] Building nvpair-node-settings (v%V_NSETTINGS%)...
+echo [9/15] Building nvpair-node-settings (v%V_NSETTINGS%)...
 cd /d "%ROOT%nvpair-node-settings"
 go build -ldflags "-X main.Version=%V_NSETTINGS%" -o nvpair-node-settings.exe . || goto :fail
 echo       OK
 
-echo [10/13] Building nvpair-ui-broker (v%V_BROKER%)...
+echo [10/15] Building nvpair-ui-broker (v%V_BROKER%)...
 cd /d "%ROOT%nvpair-ui-broker"
 go build -ldflags "-X main.Version=%V_BROKER%" -o nvpair-ui-broker.exe . || goto :fail
 echo       OK
 
-echo [11/13] Building nvpair-cluster-manager (v%V_CLUMGR%)...
+echo [11/15] Building nvpair-cluster-manager (v%V_CLUMGR%)...
 cd /d "%ROOT%nvpair-cluster-manager"
 go build -ldflags "-X main.Version=%V_CLUMGR%" -o nvpair-cluster-manager.exe . || goto :fail
 echo       OK
 
-echo [12/13] Building nvpair-job-scheduler (v%V_SCHED%)...
+echo [12/15] Building nvpair-job-scheduler (v%V_SCHED%)...
 cd /d "%ROOT%nvpair-job-scheduler"
 go build -ldflags "-X main.Version=%V_SCHED%" -o nvpair-job-scheduler.exe . || goto :fail
 echo       OK
 
-echo [13/13] Building nvpair-tui (v%V_TUI%)...
+echo [13/15] Building nvpair-tui (v%V_TUI%)...
 cd /d "%ROOT%nvpair-tui"
 go build -ldflags "-X main.Version=%V_TUI%" -o nvpair-tui.exe . || goto :fail
+echo       OK
+
+echo [14/15] Building nvpair-codex-worker (v%V_CODEX_WORKER%)...
+cd /d "%ROOT%nvpair-codex-worker"
+go build -ldflags "-X main.Version=%V_CODEX_WORKER%" -o nvpair-codex-worker.exe . || goto :fail
+echo       OK
+
+echo [15/15] Building nvpair-codex-supervisor (v%V_CODEX_SUPERVISOR%)...
+cd /d "%ROOT%nvpair-codex-supervisor"
+go build -ldflags "-X main.Version=%V_CODEX_SUPERVISOR%" -o nvpair-codex-supervisor.exe . || goto :fail
 echo       OK
 
 echo.
@@ -168,6 +182,8 @@ copy /y "%ROOT%nvpair-ui-broker\nvpair-ui-broker.exe" "%BIN_OUT%\nvpair-ui-broke
 copy /y "%ROOT%nvpair-cluster-manager\nvpair-cluster-manager.exe" "%BIN_OUT%\nvpair-cluster-manager.exe" >nul || goto :fail
 copy /y "%ROOT%nvpair-job-scheduler\nvpair-job-scheduler.exe" "%BIN_OUT%\nvpair-job-scheduler.exe" >nul || goto :fail
 copy /y "%ROOT%nvpair-tui\nvpair-tui.exe" "%BIN_OUT%\nvpair-tui.exe" >nul || goto :fail
+copy /y "%ROOT%nvpair-codex-worker\nvpair-codex-worker.exe" "%BIN_OUT%\nvpair-codex-worker.exe" >nul || goto :fail
+copy /y "%ROOT%nvpair-codex-supervisor\nvpair-codex-supervisor.exe" "%BIN_OUT%\nvpair-codex-supervisor.exe" >nul || goto :fail
 
 echo.
 echo ========================================
@@ -187,6 +203,8 @@ echo  UI Broker:        %BIN_OUT%\nvpair-ui-broker.exe
 echo  Cluster Mgr:      %BIN_OUT%\nvpair-cluster-manager.exe
 echo  Job Scheduler:    %BIN_OUT%\nvpair-job-scheduler.exe
 echo  TUI:              %BIN_OUT%\nvpair-tui.exe
+echo  Codex Worker:      %BIN_OUT%\nvpair-codex-worker.exe
+echo  Codex Supervisor:  %BIN_OUT%\nvpair-codex-supervisor.exe
 echo.
 
 REM Surface the product version to any caller (e.g. installer_build.bat) so

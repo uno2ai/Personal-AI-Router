@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Design Specification: Native Local Codex on an Agent-Aware PAIR Fabric
 
 **Status:** Superseded by `2026-09-04-codex-supervisor-pair-control-plane.md`
