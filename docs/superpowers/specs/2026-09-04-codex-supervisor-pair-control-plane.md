@@ -1,311 +1,523 @@
-# Design Specification: Native Codex Supervisor over PAIR's Secure Node Fabric
+# Native Multi-Device Codex Orchestration over PAIR
 
-**Status:** Proposed
+**Status:** Proposed for implementation after security review
+**Provenance:** `gpt-5.6-sol / max` architecture draft, integrated with the supplied deep review
 **Date:** 2026-09-04
 **Repository:** NVIDIA Personal-AI-Router v0.1.1 (`13b68115fa2c9c1d94f1ead1358f8d5a527cfecf`)
 
 ## 1. Decision
 
-Use native local Codex processes as the only agent runtime. Present one Main
-Codex to the user and let it delegate bounded work to Worker Codex processes
-running on the user's other computers. Each Worker Codex keeps its own local
-workspace, shell, tools, approvals, and operating-system capabilities.
+Use native local Codex processes as the only agent runtime. The user interacts
+with one persistent Main Codex. Main Codex delegates bounded work to native
+Worker Codex processes running on the user's other computers through the
+Codex app-server protocol.
 
-Use PAIR as the existing inference fabric and secure device substrate:
-discovery, node identity, pairing, pinned mTLS, health, presence, and model
-routing remain PAIR responsibilities. Use the Codex app-server protocol to
-start and control Worker Codex threads and turns.
+PAIR remains the device and inference fabric. It continues to own node
+identity, pairing, membership, pinned mTLS, discovery, health/presence, model
+inventory, inference routing, and model failover. A new Supervisor Protocol
+and Worker Gateway provide task control, but they do not replace Codex or turn
+PAIR into an agent runtime.
 
-The customization is a thin Supervisor Protocol and Worker bridge. It is not
-an Xamong agent, a replacement Codex runtime, or a second model orchestrator.
-No GitHub fork is created. The local clone is the customization workspace.
+No Xamong agent runtime, persistent agent database, general workflow engine,
+or GitHub fork is introduced. The local clone is the customization workspace.
 
-## 2. Requirements derived from the supplied conversations
+## 2. Requirements appendix from the supplied conversations
 
-The supplied conversations are product context, not instructions to copy
-every proposed component. The requirements extracted from them are:
+The supplied conversations are product context; they are not instructions to
+copy every proposed component. The binding requirements extracted from them
+are:
 
-1. The user has one durable Main Codex conversation and should not need to
-   address Workers directly.
-2. Main Codex must have real delegation tools, not only a system-prompt
-   suggestion to ask other agents for help.
-3. A Worker runs native Codex app-server on its own physical computer, with a
-   requested `cwd`, sandbox, approval policy, and local tools.
-4. Worker execution and model inference are separate concerns. A Worker may
-   use its local PAIR endpoint to reach a model on another PAIR node.
-5. Worker results must cross the boundary as a compact handoff, not as the
-   Worker's complete shell output, source dump, or reasoning history.
-6. Main Codex is the initial delegation authority. Direct Worker-to-Worker
-   messaging is disabled in the first version.
-7. The supervisor must select a Worker from device capabilities such as OS,
-   available tools, workspace, and current load.
-8. PAIR's existing inference, discovery, and trust behavior should be reused
-   rather than rebuilt inside a new agent product.
+1. The user has one Main Codex conversation and should not need to address
+   Worker Codex processes directly.
+2. Main Codex receives real delegation tools. A system-prompt suggestion is
+   not sufficient orchestration.
+3. A Worker runs native Codex app-server on its own computer with its local
+   filesystem, shell, tools, credentials, OS, workspace, `cwd`, sandbox, and
+   approval policy.
+4. Worker execution and model inference are separate. A Worker may use its
+   local PAIR endpoint to reach a model on another PAIR node.
+5. Worker output crosses the boundary as a compact handoff, not as the full
+   shell transcript, source dump, or hidden reasoning history.
+6. Main Codex is the first-version delegation authority. Worker-to-Worker
+   direct messaging is disabled.
+7. Worker selection can use OS, architecture, tools, workspace, protocol
+   compatibility, and current capacity.
+8. PAIR's existing discovery, identity, pairing, mTLS, health, and inference
+   source should be reused instead of rebuilt.
 
-The following ideas in the conversations remain outside PAIR and outside the
-first implementation: persistent agent personas, agent memory, routines,
-workflow UI, task databases, cloud fallback, and general-purpose agent
-collaboration.
+Persistent agent personas, memory, routines, task-DAG execution, automatic
+Main failover, cross-machine `thread/fork`, automatic Git integration, and
+unrestricted artifact synchronization are deferred.
 
-## 3. Target architecture
+## 3. Architecture
 
 ```text
 User
   │
   ▼
 Main Codex (native local CLI/app)
-  │ MCP tools / Supervisor Protocol
+  │ local MCP tools
   ▼
 Codex Supervisor (local control process)
-  │ PAIR discovery + pinned mTLS
+  │ Supervisor Protocol: HTTPS + pinned mTLS
   ├───────────────┬───────────────────┐
   ▼               ▼                   ▼
-Worker A       Worker B            Worker C
-macOS          Windows             macOS
-Codex          Codex               Codex
-app-server     app-server          app-server
-workspace      workspace           workspace
-  │               │                   │
-  └───────────────┴───────────────────┘
-                  │ inference only
-                  ▼
-                 PAIR
-        existing model/node routing
+Worker Gateway A  Worker Gateway B    Worker Gateway C
+macOS             Windows              macOS
+  │                 │                   │
+  ▼                 ▼                   ▼
+codex app-server   codex app-server    codex app-server
+  │                 │                   │
+local workspace    local workspace     local workspace
+  │                 │                   │
+  └─────────────────┴───────────────────┘
+                    │ inference only
+                    ▼
+                   PAIR
+          existing model/node routing
 ```
 
-The Supervisor is a control-plane process, not an LLM agent. It owns worker
-registration, capability matching, task lifecycle, event reduction, and
-handoff envelopes. It does not read or modify a Worker's source tree except
-through an explicitly requested Worker task.
+The Supervisor is a deterministic control-plane process. It has no model and
+does not make product decisions. PAIR remains symmetric and peer-to-peer; the
+Supervisor is not a PAIR cluster leader.
 
-## 4. Existing PAIR source to reuse
+## 4. Responsibilities and source reuse
 
-The implementation will reuse the existing PAIR components as follows:
+### Main Codex
 
-- `services/shared/nodeid`: one durable PAIR node identity per host.
-- `services/shared/clustertrust`: pinned peer certificates and the existing
-  mTLS client/server configuration.
-- `services/shared/noderec` and the broker's discovery path: node identity,
-  service registration, discovery snapshots, and presence updates.
-- `services/shared/jsonrpc`: framing and request/notification patterns where a
-  stream transport is appropriate.
+Main Codex maintains the user conversation, decomposes work, creates bounded
+context packages, invokes Supervisor tools, evaluates handoffs, and owns the
+final answer. Main Codex does not receive a raw Worker terminal.
+
+### Codex Supervisor
+
+The Supervisor is a local MCP server for Main Codex. It discovers Workers,
+validates task envelopes, selects an eligible Worker, tracks task state,
+transports requests, reconnects to event streams, and returns compact
+progress/results. It contains no LLM and does not read or modify a Worker
+workspace itself.
+
+### Worker Gateway
+
+The Worker Gateway is a standalone Go service on each participating computer.
+It authenticates Supervisors, enforces local workspace and execution policy,
+starts and supervises app-server children, normalizes public events, manages
+leases, and stores task state/results durably.
+
+### Worker Codex
+
+Worker Codex is the native `codex app-server` process. It remains authoritative
+for thread/turn state, tool execution, filesystem access, shell commands,
+approvals, and local execution events.
+
+### PAIR components to reuse
+
+- `services/shared/nodeid`: durable host identity.
+- `services/shared/clustertrust`: cluster membership, pinned certificate
+  material, mTLS client/server configuration, and live pin checks.
+- `services/shared/noderec`: `_nvpair-node._tcp` records, service-port TXT
+  parsing, IP candidate ordering, and discovery data structures.
+- `services/shared/jsonrpc`: stream framing where a local adapter needs it.
 - `services/nvpair-cluster-manager`: cluster membership and trust-store
-  lifecycle; it remains the owner of cluster certificates and pins.
-- `services/nvpair-ui-broker`: only the existing discovery and lifecycle
-  integration where needed. Its single-client UI JSON-RPC channel is not
-  reused as a remote task bus.
-- `services/ollama-proxy` and `services/lmstudio-proxy`: unchanged model
-  routing, model eligibility, reservations, streaming, and failover.
-- `services/nvpair-job-scheduler`: unchanged inference-node ranking.
+  lifecycle; it remains the certificate/pin owner.
+- `services/nvpair-ui-broker`: optional local supervision and existing
+  `discovery:register` forwarding for the Worker service. It is not a remote
+  task bus and its single-client UI channel is not reused for task traffic.
+- `services/ollama-proxy`, `services/lmstudio-proxy`, and
+  `services/nvpair-job-scheduler`: unchanged inference routing and failover.
 
-The current PAIR scheduler is not a device task scheduler and is not aware of
-OS/tool capabilities. Worker selection is therefore a separate policy in the
-Supervisor. PAIR still decides where each Worker's model request executes.
+The inference scheduler is model/node ranking, not OS/tool task scheduling.
+Worker capability selection therefore belongs to the Supervisor.
 
-## 5. Supervisor Protocol
+## 5. Supervisor Protocol v1
 
-The Main Codex integration exposes a small MCP/tool surface backed by the
-Supervisor. The initial operations are:
+Supervisor Protocol v1 is JSON over HTTPS on a dedicated mTLS-only Worker
+endpoint. The default port is `14324`, advertised in the existing PAIR node
+record as `cw=14324` (Codex Worker). It never tunnels raw app-server methods.
 
 | Operation | Purpose |
 | --- | --- |
-| `workers.list` | Return online Workers and sanitized capabilities |
-| `tasks.delegate` | Create a task with objective, context package, requirements, and workspace |
-| `tasks.status` | Return lifecycle state and bounded progress |
-| `tasks.result` | Return the compact handoff envelope |
-| `tasks.cancel` | Request cancellation of a running Worker turn |
-| `artifacts.get` | Fetch an explicitly named result artifact within policy limits |
+| `GET /v1/worker` | Authenticated identity, capabilities, protocol/app-server version, capacity |
+| `POST /v1/tasks` | Idempotently accept one bounded task attempt |
+| `GET /v1/tasks/{id}` | Current state, owner, lease epoch, and latest event sequence |
+| `GET /v1/tasks/{id}/events?after={seq}` | Reconnectable bounded NDJSON progress stream |
+| `POST /v1/tasks/{id}/turns` | Bounded follow-up using the same fenced Worker thread |
+| `POST /v1/tasks/{id}/cancel` | Idempotent cancellation |
+| `GET /v1/tasks/{id}/result` | Validated compact handoff |
+| `GET /v1/tasks/{id}/artifacts/{artifactId}` | Fetch a declared, digest-verified artifact |
 
-The protocol is request/response plus bounded progress events. It does not
-expose arbitrary shell execution, arbitrary file reads, or a raw Worker
-terminal to the Main Codex.
+There is deliberately no remote approval endpoint in v1. A Worker approval
+event transitions the task to `blocked` with reason `approval_required`.
+Only a local human at the Worker host may approve it. Main Codex cannot turn
+an AI-generated message into a human approval through this protocol.
 
-### Task request
+Every mutation carries `protocolVersion`, `requestId`, `taskId`, `attemptId`,
+and `leaseEpoch`. The Worker durably records the request before acknowledging
+it. Replaying a request returns the original result; a conflicting request for
+an existing task is rejected.
+
+Events have a monotonically increasing `seq`. Reconnection resumes after the
+last committed sequence. Only normalized state, progress, terminal, and
+artifact metadata cross the network. Raw reasoning and full app-server
+transcripts do not.
+
+The local MCP surface exposed to Main is intentionally small:
+
+- `workers.list`
+- `tasks.delegate`
+- `tasks.status`
+- `tasks.result`
+- `tasks.cancel`
+- `artifacts.get`
+
+Workers cannot delegate. Any review or follow-up task is created by Main
+through the Supervisor.
+
+## 6. Worker lifecycle and durable fencing
+
+The Worker Gateway performs this sequence:
+
+1. Start with a configured PAIR cluster directory, workspace allowlist,
+   Supervisor certificate allowlist, capacity, and local execution policy.
+2. Load and replay its durable task journal before accepting new work.
+3. Register `cw=14324` with the local PAIR broker when broker supervision is
+   enabled; otherwise use the configured endpoint registry for phase one.
+4. Accept a task only after mTLS authentication, ACL validation, schema
+   validation, workspace resolution, and capacity/lease checks.
+5. Persist the acceptance and lease record, then start one native
+   `codex app-server` child for the attempt.
+6. Initialize the app-server adapter, create or resume a thread, and start a
+   turn with the validated `cwd`, sandbox, approval policy, and context.
+7. Normalize public app-server events into bounded progress and sequence them
+   durably.
+8. On completion, validate the handoff, register declared artifacts, persist
+   the terminal result, and close only that task's app-server child.
+
+### Lease model
+
+The Worker enforces at most one active attempt per `taskId` and per canonical
+local workspace. A lease record contains:
+
+```text
+taskId, attemptId, leaseEpoch, workspaceKey,
+supervisorPrincipal, state, childIdentity, updatedAt
+```
+
+`leaseEpoch` increases monotonically. Every follow-up, cancellation, event
+acknowledgement, and result operation must match the current task/attempt/
+epoch tuple. A fenced or stale tuple receives a conflict and cannot mutate
+state.
+
+Network loss never triggers automatic reassignment. A retry is allowed only
+after the old app-server child is confirmed terminated and the old lease is
+persistently fenced/released. If the Worker disappeared and termination
+cannot be proven, the task remains `lost` and a new attempt is not started
+automatically. This prevents an old and new attempt from changing the same
+workspace concurrently.
+
+Multiple Supervisors are supported at the Worker boundary even though the
+product UX has one Main Codex. The Worker is authoritative for slot counts,
+task idempotency, and workspace leases. The first accepted request owns a task;
+different supervisors cannot use the same task ID or workspace lease without
+an explicit release/fence operation.
+
+## 7. Discovery, service registration, and mTLS
+
+`cw=14324` is added to the existing `noderec.ServiceKey` order and registered
+through the existing broker discovery path. The mDNS schema version remains
+unchanged because the existing parser already supports forward-compatible
+service keys. Older PAIR nodes ignore `cw`; a Supervisor requires the key for
+automatic Worker discovery. Fixed-port probing without a TXT service key is
+not used.
+
+The Supervisor treats mDNS as an address hint only:
+
+1. Parse the node record and collect its `hostUuid`, `clusterUuid`, `cw` port,
+   and ranked IP candidates.
+2. Refresh the live `clustertrust.Mesh` and require a current cluster
+   membership and pin.
+3. Dial the advertised candidates with the Supervisor's PAIR certificate and
+   byte-for-byte pinned server certificate.
+4. Accept Worker capability data only after the Worker verifies the client's
+   current pin and local Supervisor ACL.
+
+The TLS certificate principal is the security identity. `hostUuid` is only a
+display/correlation value. Discovery entries are keyed by authenticated
+certificate principal, not hostname. A hostname/correlation collision is
+quarantined when an authenticated `/v1/worker` response does not agree with
+the advertised identity. Quarantine clears only after two consecutive
+successful probes with a unique matching principal and current pin; until
+then the entry cannot be selected.
+
+`clustertrust.Mesh.Watch` is a polling watcher, not a push/live signal. Its
+current `RefreshInterval` is two seconds. The Worker therefore:
+
+- calls `mesh.Refresh()` before every HTTP authorization check;
+- revalidates the authenticated peer certificate against the current pin on
+  every request, including requests on a reused HTTP connection;
+- runs a two-second revocation poller for active tasks and cancels tasks whose
+  Supervisor principal or certificate is no longer current.
+
+The revocation target is `2 * clustertrust.RefreshInterval + 1 second` under
+normal scheduling, and the integration test measures this bound. Pin removal
+or certificate rotation is not described as instantaneous. An unclustered
+Worker refuses mTLS and never falls back to plaintext.
+
+The `nvpair-ui-broker` channel remains single-client and local. It may spawn
+the Worker and forward its service registration, but Supervisor task payloads
+always use the dedicated Worker endpoint.
+
+## 8. Codex app-server adapter
+
+A versioned adapter isolates Supervisor Protocol from app-server changes. Its
+semantic operations are:
+
+- initialize and negotiate a supported app-server version;
+- start or resume a local thread;
+- start a turn with validated `cwd`, sandbox, approval policy, and context;
+- consume public progress, tool, approval, completion, and error events;
+- interrupt a turn and close the child process.
+
+The exact method names described in the supplied conversation are verified
+against the installed Codex CLI during implementation. Unsupported versions
+make a Worker `incompatible`; the adapter does not approximate missing
+semantics. Cross-machine `thread/fork` is excluded from v1.
+
+## 9. Capability-aware Worker selection
+
+Workers publish authenticated, locally configured capabilities:
+
+- OS and architecture;
+- Worker Protocol and app-server versions;
+- workspace aliases, canonical roots, and access modes;
+- tool labels such as PowerShell, Xcode, Docker, CUDA, or browser;
+- supported sandbox/approval modes;
+- maximum concurrency and currently available slots.
+
+Selection is deterministic:
+
+1. Filter by current trust, protocol compatibility, workspace alias, OS/
+   architecture, required tools, access mode, and local policy.
+2. Honor an explicit Worker selection only if it is eligible.
+3. Prefer exact workspace/tool locality.
+4. Prefer available capacity and then least-recent assignment.
+5. Break ties by authenticated cluster principal.
+
+PAIR's job scheduler is never queried or modified for this decision. It
+continues to rank inference destinations for the model requests made by Main
+or Worker Codex.
+
+## 10. Context, handoff, and artifacts
+
+The Supervisor sends a bounded context package, not the full Main conversation.
+The v1 package limit is 256 KiB excluding separately transferred artifacts:
 
 ```json
 {
-  "task_id": "task-2081",
-  "requirements": {
-    "os": "windows",
-    "tools": ["powershell", "visual-studio"],
-    "workspace": "D:\\workspace\\pair"
-  },
-  "context": {
-    "objective": "Run the PAIR Windows build and analyze failures",
-    "why": "Evaluate cross-platform runtime support",
-    "constraints": ["do not modify source"],
-    "expected_output": ["build status", "blockers", "recommendation"]
-  },
-  "execution": {
-    "sandbox": "read-only",
-    "approval_policy": "on-request"
-  }
+  "version": 1,
+  "objective": "One measurable bounded outcome",
+  "relevantDecisions": ["Only facts needed for this task"],
+  "workspace": {"id": "pair", "mode": "read", "baseRevision": "optional"},
+  "constraints": ["No edits", "Run Windows-native tests"],
+  "requiredEvidence": ["commands", "test outcomes", "file references"],
+  "limits": {"wallSeconds": 1800},
+  "execution": {"sandbox": "workspace-read", "approval": "local-only"},
+  "inputs": [{"artifactId": "a1", "sha256": "..."}]
 }
 ```
 
-The Supervisor validates the workspace against the Worker's configured
-allowed roots. The caller cannot use the protocol to escape those roots or
-silently weaken the Worker's local safety policy.
-
-### Result handoff
+The handoff limit is 64 KiB:
 
 ```json
 {
-  "task_id": "task-2081",
+  "version": 1,
+  "taskId": "task-2081",
+  "attemptId": "attempt-1",
   "status": "completed",
   "summary": "Windows build failed because of two Unix path assumptions.",
-  "findings": [
-    {
-      "severity": "blocker",
-      "file": "services/foo/path.go",
-      "issue": "Unix path assumption"
-    }
-  ],
-  "changed_files": [],
-  "tests": {"passed": 43, "failed": 1},
-  "commit": "",
-  "artifacts": ["windows-test.log"],
-  "recommendation": "Add a path abstraction and rerun the build."
+  "findings": [{"severity": "blocker", "location": "services/foo/path.go", "detail": "Unix path assumption"}],
+  "changes": [],
+  "verification": [{"command": "go test ./...", "outcome": "passed", "artifactId": "log1"}],
+  "artifacts": [{"id": "log1", "sha256": "...", "bytes": 1234}],
+  "recommendedNext": "Add a path abstraction and rerun the build."
 }
 ```
 
-The Supervisor forwards this envelope and bounded progress summaries to Main
-Codex. It never forwards the complete event history or prompt/response body
-as a default result.
+Artifacts are copied into a per-task staging directory and addressed by an
+opaque ID and SHA-256 digest. The endpoint never streams an arbitrary path
+directly. The safe path implementation must:
 
-## 6. Worker lifecycle
+- reject absolute paths, `..`, empty components, and paths outside the
+  canonical per-task root;
+- reject symlink/reparse-point components using `Lstat` plus canonical
+  containment checks;
+- use platform-specific no-follow opening where available;
+- copy to a Worker-created, digest-addressed staging file before serving;
+- enforce maximum bytes and task-local allowlists.
 
-Each Worker host runs a small PAIR-integrated Worker service. The service:
+Artifact reads are explicit and bounded. Full source trees, undeclared files,
+credentials, and large inline outputs are not returned to Main by default.
 
-1. registers its Worker capability record with the local PAIR node;
-2. accepts only authenticated requests from pinned cluster peers;
-3. validates task requirements, allowed workspace, sandbox, and approval
-   policy against local configuration;
-4. starts `codex app-server` locally using stdio or a loopback control socket;
-5. creates or resumes a Codex thread and starts the requested turn with the
-   validated `cwd` and execution policy;
-6. reduces app-server notifications into bounded task progress;
-7. captures the final Worker result into the handoff envelope;
-8. supports cancellation and cleans up the child process after completion.
+## 11. Security-critical decisions and controls
 
-The Worker service does not implement an agent loop. Codex app-server remains
-the authority for tool execution, filesystem access, shell execution,
-approvals, thread history, and turn events.
+### C1: revocation latency
 
-The first version permits one active task per Worker unless local policy
-explicitly raises the limit. It does not attempt to migrate a running Codex
-thread between physical machines.
+The two-second `Mesh.Watch` polling interval is documented as a bound, not as
+live push. Request authorization refreshes the mesh and checks the current
+certificate pin. Active-task revalidation cancels affected tasks within the
+defined five-second target under normal scheduling. Tests measure pin removal,
+new-request rejection, active-task cancellation, and certificate rotation.
 
-## 7. Discovery and transport
+### C2: approval authenticity
 
-Worker capability discovery must use the PAIR node identity and trust model,
-not an unauthenticated LAN port. The preferred integration is a new
-Worker-service registration in the existing node record and a pin-gated mTLS
-endpoint. If adding a service name to the node record proves broader than the
-first vertical slice, an explicit endpoint configured alongside the existing
-cluster identity is acceptable for phase one, but it must still use
-`clustertrust` mTLS.
+Remote approval relay is not part of v1. The protocol has no approval mutation
+endpoint. An approval request is terminally `blocked` for remote control and
+requires a local human at the Worker host. A future human approval channel
+must introduce a separately authenticated, one-time user capability before it
+can be added.
 
-The existing `nvpair-ui-broker` stdio/IPC channel is single-client and is
-owned by its spawning desktop/TUI client. The Supervisor must not start a
-second broker on the same host or use the broker as a multiplexed remote task
-transport.
+### C3: stale-attempt fencing
 
-## 8. Model integration
+Durable task records, per-workspace leases, monotonic `leaseEpoch`, child
+identity, and stale-tuple rejection prevent a lost attempt from racing a
+retry. Network loss alone never releases a lease or starts a retry. An
+operator must prove child termination before fencing/releasing an old attempt.
 
-Main and Worker Codex processes use their normal local Codex configuration.
-When a Codex process should use PAIR for inference, its provider endpoint is
-the host's PAIR-local Ollama-compatible or LM Studio-compatible endpoint.
-This is a provider/profile concern, not a change to the Codex executable.
+### M4: durable idempotency and restart
 
-The implementation must verify the installed Codex CLI's app-server and
-provider configuration before documenting commands. In particular, the
-header-aware custom-provider path is optional and is not a dependency of the
-Supervisor Protocol. No `X-PAIR-*` routing metadata is added to PAIR's broker,
-workload, desktop, or scheduler contracts in this design.
+The Worker uses an append-only JSONL journal under its configured state root.
+Each mutation is written and `fsync`ed before its response is acknowledged.
+Startup replays the journal to rebuild task state, idempotency records,
+leases, and event sequences. Terminal records and artifacts are retained for
+seven days by default; active/lost records remain until explicitly resolved.
+Compaction is allowed only after no active lease depends on the compacted
+records.
 
-PAIR continues to route each complete model request to one eligible engine
-node. It does not pool VRAM or shard one Codex inference across machines.
+After a Worker restart, a running child is adopted only if its persisted
+process identity can be proven. Otherwise the attempt becomes `lost` and is
+not replayed. No side-effecting turn is silently restarted.
 
-## 9. Security and privacy
+### M5: multiple Supervisors
 
-- Worker control traffic uses the existing cluster membership and pinned mTLS.
-- A Worker accepts task operations only from authenticated cluster peers and
-  rejects unknown task methods.
-- Workspace paths are checked against local allowlists and normalized before
-  use.
-- Sandbox and approval settings are constrained by Worker policy; remote
-  callers cannot silently request unrestricted execution.
-- Artifact reads are explicit, bounded, and restricted to task output paths.
-- Prompts, responses, source files, credentials, and shell output are not
-  logged by the Supervisor or persisted by PAIR. Only task metadata and
-  bounded handoff data are retained by the control process.
-- Worker-to-Worker direct messaging is disabled initially; Main Codex remains
-  the delegation authority.
+The single-Main UX is not a security assumption. Worker ACLs may authorize
+multiple Supervisor certificate principals, but Worker-side capacity,
+idempotency, task ownership, and workspace leases are authoritative. A second
+Supervisor receives the existing task for a duplicate request ID or a
+conflict/busy response for an occupied task/workspace. There is no preemption.
 
-## 10. Failure behavior
+### M2: identity collision
 
-- If a Worker disappears before acceptance, the Supervisor marks the task
-  unavailable and may select another eligible Worker.
-- If a Worker disappears during execution, the task is failed with the last
-  bounded progress summary; automatic retry is opt-in and starts a new Codex
-  turn.
-- If `codex app-server` exits unexpectedly, the Worker reports a structured
-  failure and preserves the process exit reason without leaking the full
-  command output.
-- Cancellation is best effort and reports whether the Worker acknowledged it.
-- A completed Worker thread is not automatically resumed or migrated on a
-  different device.
-- PAIR model failover remains governed by the existing proxy behavior and is
-  independent of Worker task retry.
+Authenticated certificate principal is the unique Worker key. `hostUuid` and
+hostname collisions are quarantined, never merged. The state is cleared only
+after two consecutive authenticated probes agree on principal, host UUID,
+cluster UUID, and current pin.
 
-## 11. Phased implementation boundary
+## 12. Failure and cancellation
 
-### Phase 1: local vertical slice
+Task states are `accepted`, `starting`, `running`, `waiting_approval`,
+`cancelling`, `completed`, `blocked`, `failed`, `cancelled`, and `lost`.
 
-Implement a Worker adapter that starts native Codex app-server locally and a
-Supervisor MCP/tool surface that can list one Worker, delegate one task, read
-bounded progress, cancel it, and return a handoff envelope. Use loopback
-transport and a configured workspace to validate the protocol without
-changing PAIR's network contracts.
+- A Worker unavailable before acceptance may be replaced by another eligible
+  Worker.
+- A Worker lost after acceptance becomes `lost`; it is not automatically
+  retried because side effects may have occurred.
+- Reconnection reconciles by task ID, attempt ID, and lease epoch; it never
+  starts a duplicate turn.
+- Cancellation interrupts the specific app-server child, waits for the grace
+  period, then terminates only that child if necessary.
+- Stale events and terminal mutations from a fenced attempt are ignored.
+- Partial declared artifacts remain available for the retention period.
+- PAIR model failover remains independent of Worker task retry.
 
-### Phase 2: PAIR-secured remote Worker
+## 13. Exact implementation boundary
 
-Reuse `nodeid` and `clustertrust` to expose the Worker service over pinned
-mTLS. Add capability registration/discovery using the narrowest compatible
-extension of the existing node record. Prove Main Codex on one host can run a
-Worker Codex on another host with that Worker's local `cwd` and tools.
+### Existing source reused
 
-### Phase 3: capability-aware placement and artifacts
+PAIR pairing, cluster-manager, cluster directory, certificates, pins,
+`nodeid`, `clustertrust`, `noderec`, candidate IP ordering, pooled mTLS client
+patterns, model inventory, inference proxies, scheduler, and existing broker
+process supervision remain the foundation.
 
-Add deterministic selection by OS, tools, workspace, online state, and active
-task count. Add explicit artifact transfer and bounded result indexing. Keep
-PAIR's inference scheduler independent; a Worker’s model calls may still be
-routed by PAIR.
+### New or narrowly changed source
 
-## 12. Explicit non-goals
+- New `services/nvpair-codex-worker` Go service for the Worker Gateway.
+- New `services/nvpair-codex-supervisor` local MCP/control service.
+- New shared protocol/types package for task envelopes, leases, events,
+  handoffs, and artifact manifests.
+- `services/shared/clustertrust`: expose the minimal current-pin check needed
+  to revalidate a saved peer certificate during active-task revocation.
+- `services/shared/noderec`: add `ServiceCodexWorker = "cw"` and deterministic
+  TXT emission/parse tests.
+- `services/nvpair-ui-broker`: optional Worker child path and existing
+  discovery registration forwarding only; no remote task methods or payload
+  body changes.
+- Installer/README/firewall documentation for the optional `cw` service.
 
-This design does not add an Xamong agent runtime, persistent agent personas,
-agent memory, routines, a general task database, a new model registry, cloud
-providers, model sharding, a PAIR UI redesign, arbitrary remote shell/RPC,
-or a replacement for Codex app-server.
+There are no changes to PAIR inference scheduler behavior, schedulerwire,
+model request bodies, inference headers, existing broker namespaces, desktop
+preload APIs, or PAIR workload payloads. PAIR's UI broker is never a remote
+task transport.
 
-## 13. Acceptance criteria
+## 14. Phased implementation
 
-The first complete implementation must demonstrate:
+1. **Local vertical slice:** Worker Gateway over loopback, app-server adapter,
+   workspace policy, journal/leases, bounded context/handoff, cancellation,
+   and local MCP tools.
+2. **PAIR service registration:** `cw` node-record advertisement, optional
+   broker supervision, port/firewall handling, and discovery tests.
+3. **Secure remote transport:** pinned mTLS, per-request pin revalidation,
+   active-task revocation polling, Supervisor ACL, multi-address dialing, and
+   hostname collision quarantine.
+4. **Capability scheduling and artifacts:** deterministic Worker selection,
+   digest-addressed staging, artifact transfer, concurrent Workers, and
+   reconnectable event streams.
+5. **Cross-platform hardening:** macOS/Windows/Linux service packaging,
+   app-server version checks, restart reconciliation, audit tests, and local
+   approval UX documentation.
 
-- One Main Codex can invoke a real delegation tool without directly managing
-  Worker processes in the user conversation.
-- A Worker service starts native Codex app-server in the selected local
-  workspace and controls it through the documented app-server protocol.
-- The Worker returns bounded progress and a compact handoff envelope.
-- A second task cannot use a workspace outside the Worker's allowlist.
-- Cross-device control is protected by PAIR's pinned mTLS before remote task
-  execution is enabled.
-- Main and Worker model requests can use PAIR endpoints without changing the
-  existing PAIR model body or inference scheduler contract.
-- A request to list, delegate, cancel, and retrieve a task is deterministic
-  and covered by tests.
-- No prompt, response, credential, or full shell transcript is logged or
-  stored by the new control path.
-- All work remains in the local clone; no GitHub fork or worktree is created.
+## 15. Acceptance tests
+
+1. Main Codex invokes a real local MCP delegation tool and receives a bounded
+   Worker handoff.
+2. Worker app-server starts with the resolved local `cwd`, restrictive
+   effective sandbox, and configured local approval policy.
+3. A duplicate mutation request is idempotent across Worker restart because
+   its journal record was persisted before acknowledgement.
+4. A lost attempt cannot be retried while its workspace lease or child
+   identity is unresolved; stale epoch mutations are rejected.
+5. Cancellation affects only the targeted task and yields an idempotent
+   terminal state.
+6. Approval events produce `blocked/approval_required`; no remote protocol
+   call can continue the turn as an approval.
+7. Removing a pin or rotating a peer certificate causes new requests to be
+   rejected after refresh and active tasks to be cancelled within five
+   seconds in the controlled integration test.
+8. Unpaired, wrong-certificate, plaintext, de-pinned, and paired-but-
+   unauthorized callers are rejected.
+9. `cw=14324` is discovered through the existing node TXT record; no port
+   scan is needed, and port/address failover remains deterministic.
+10. Conflicting host UUIDs are kept as separate authenticated principals and
+    remain quarantined until two consistent probes clear the state.
+11. Symlink/reparse traversal, `..`, absolute paths, undeclared artifacts,
+    and over-limit artifact reads are rejected.
+12. Two authorized Supervisors cannot exceed Worker capacity or acquire the
+    same workspace lease concurrently.
+13. A Worker/app-server restart never silently replays a side-effecting turn.
+14. Main receives no full conversation, hidden reasoning, undeclared file, or
+    credential; logs contain no prompt, response, or source body.
+15. Existing PAIR broker methods, desktop bridge, scheduler messages, model
+    request bodies, inference headers, and unrelated mDNS records remain
+    contract-compatible.
+
+## 16. Remaining non-critical risks
+
+- Installed Codex app-server versions may differ in initialization, resume,
+  cancellation, structured output, or event names; the adapter must fail
+  closed on unsupported versions.
+- Windows service accounts may not share the interactive user's Codex login,
+  desktop session, or tool environment.
+- Workspace revisions and dirty state can differ across computers; automatic
+  patch application and cross-machine Git synchronization are out of scope.
+- An abrupt host power loss can leave an external side effect unknown even
+  when the journal correctly prevents automatic replay; retry remains an
+  explicit operator decision.
