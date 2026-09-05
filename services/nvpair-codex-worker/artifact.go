@@ -102,10 +102,18 @@ func (s *ArtifactStore) StageHandoff(taskID, workspace string, handoff *codexpro
 		hash := sha256.New()
 		written, copyErr := io.Copy(io.MultiWriter(output, hash), io.LimitReader(input, s.maxBytes+1))
 		closeInErr := input.Close()
+		var syncErr error
+		if copyErr == nil {
+			syncErr = output.Sync()
+		}
 		closeOutErr := output.Close()
 		if copyErr != nil {
 			_ = os.Remove(tmpPath)
 			return fmt.Errorf("copy artifact: %w", copyErr)
+		}
+		if syncErr != nil {
+			_ = os.Remove(tmpPath)
+			return fmt.Errorf("sync staged artifact: %w", syncErr)
 		}
 		if closeInErr != nil || closeOutErr != nil {
 			_ = os.Remove(tmpPath)
@@ -114,10 +122,6 @@ func (s *ArtifactStore) StageHandoff(taskID, workspace string, handoff *codexpro
 		if written > s.maxBytes {
 			_ = os.Remove(tmpPath)
 			return fmt.Errorf("%w: %d bytes", ErrArtifactTooLarge, written)
-		}
-		if err := syncFile(tmpPath); err != nil {
-			_ = os.Remove(tmpPath)
-			return fmt.Errorf("sync staged artifact: %w", err)
 		}
 		if err := os.Rename(tmpPath, finalPath); err != nil {
 			_ = os.Remove(tmpPath)
@@ -249,15 +253,6 @@ func newArtifactID() (string, error) {
 		return "", err
 	}
 	return "artifact-" + hex.EncodeToString(data[:]), nil
-}
-
-func syncFile(path string) error {
-	file, err := os.OpenFile(path, os.O_RDONLY, 0)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	return file.Sync()
 }
 
 func removeArtifactTaskDir(path string) error { return os.RemoveAll(path) }
