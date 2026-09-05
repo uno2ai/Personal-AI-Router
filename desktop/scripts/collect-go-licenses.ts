@@ -80,7 +80,17 @@ async function listModulesForTarget(
     try {
         const result = await execFileAsync('go', ['list', '-deps', '-f', template, '.'], {
             cwd: componentDir,
-            env: { ...process.env, GOOS: goos, GOARCH: goarch, CGO_ENABLED: '0' },
+            // License collection only needs module metadata. Disable VCS
+            // stamping because release worktrees can themselves live below a
+            // different VCS checkout (for example Git inside an SVN-managed
+            // workspace), which makes `go list` fail before it prints modules.
+            env: {
+                ...process.env,
+                GOOS: goos,
+                GOARCH: goarch,
+                CGO_ENABLED: '0',
+                GOFLAGS: `${process.env.GOFLAGS ?? ''} -buildvcs=false`.trim()
+            },
             maxBuffer: 32 * 1024 * 1024
         })
         stdout = result.stdout
