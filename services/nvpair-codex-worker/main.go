@@ -33,11 +33,18 @@ func main() {
 	allowedSupervisors := flag.String("supervisor-allowlist", "", "comma-separated authorized Supervisor certificate principals in mTLS mode")
 	toolLabels := flag.String("tool-labels", "", "comma-separated local capability labels advertised to the Supervisor")
 	artifactMaxBytes := flag.Int64("artifact-max-bytes", 8<<20, "maximum size of one staged artifact")
+	managedControl := flag.Bool("managed-control", false, "run as a broker-managed Worker using JSONL control on stdin/stdout")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
 	if *showVersion {
 		fmt.Println(Version)
+		return
+	}
+	if *managedControl {
+		if err := runManagedControl(os.Stdin, os.Stdout); err != nil {
+			log.Printf("managed Worker control stopped: %v", err)
+		}
 		return
 	}
 	if *workspaceRoot == "" {

@@ -99,25 +99,25 @@
 - `codexruntime.ControlMessage` supports `start`, `status`, `drain`, `shutdown`, and `configRevision`; `ControlEvent` supports `ready`, `status`, `stopped`, and `error`.
 - `codexworkerSupervisor.Start(ctx, config)`, `Status()`, `Drain(ctx)`, and `Stop(ctx)` are broker-owned lifecycle methods and expose no task-body field.
 
-- [ ] **Step 1: Write descriptor/control serialization and validation tests.**
+- [x] **Step 1: Write descriptor/control serialization and validation tests.**
 
   Cover rejection of zero schema, missing installation/instance IDs,
   non-increasing boot epochs, expired descriptors, secret material in JSON,
   unknown control kinds, task-body-shaped fields, and config revision rollback.
 
-- [ ] **Step 2: Run the shared tests and verify they fail for missing types.**
+- [x] **Step 2: Run the shared tests and verify they fail for missing types.**
 
   Run `go test ./...` in `services/shared`; the new package tests must fail to
   compile because the runtime package does not exist.
 
-- [ ] **Step 3: Implement the shared runtime contract.**
+- [x] **Step 3: Implement the shared runtime contract.**
 
   Use strict JSON decoding, bounded strings, RFC3339 UTC timestamps, and
   atomic descriptor writes (`create temp -> chmod user-only -> fsync -> rename`).
   Keep credential values out of the descriptor; only a protected credential
   reference and generation are serialized.
 
-- [ ] **Step 4: Add the managed Worker stdin/stdout protocol test.**
+- [x] **Step 4: Add the managed Worker stdin/stdout protocol test.**
 
   Start the Worker in managed mode with a temporary workspace and fake
   app-server factory, send `start` and `status`, assert a `ready` event with a
@@ -125,7 +125,7 @@
   `stopped`. Close parent stdin and assert bounded shutdown without a task
   request.
 
-- [ ] **Step 5: Implement Worker managed mode and broker supervision.**
+- [x] **Step 5: Implement Worker managed mode and broker supervision.**
 
   Add `--managed-control` to the Worker. Keep standalone signal mode intact.
   The broker passes a protected config path and Worker path, starts exactly one
@@ -133,7 +133,7 @@
   withdraws readiness before config revision changes or shutdown. Broker EOF,
   Worker crash, duplicate start, and drain timeout must become explicit states.
 
-- [ ] **Step 6: Run affected Go tests and commit.**
+- [x] **Step 6: Run affected Go tests and commit.**
 
   Run `go test ./...` in `services/shared`, `services/nvpair-codex-worker`, and
   `services/nvpair-ui-broker`, then commit with

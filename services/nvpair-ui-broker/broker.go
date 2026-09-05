@@ -161,6 +161,7 @@ type Broker struct {
 	clusterMgrPath    string
 	schedulerPath     string
 	codexWorker       string
+	codexWorkerConfig string
 	codexWorkerPort   int
 	clusterDir        string
 	// Managed-port state is prepared before proxy startup and read by the proxy
@@ -237,6 +238,7 @@ type Broker struct {
 	settingsSup      *supervisor
 	clusterMgrSup    *supervisor
 	schedulerSup     *supervisor
+	codexWorkerSup   *supervisor
 
 	// subMu guards subscribed. The discovery:nodes-changed stream is
 	// opt-in: emitNodesChanged (called on the scanner-event goroutine)
@@ -328,19 +330,20 @@ type Broker struct {
 // required; every other field is optional (an empty string means the
 // broker won't spawn that worker because its binary couldn't be resolved).
 type workerPaths struct {
-	scanner         string
-	nodeInfo        string
-	proxy           string
-	lmstudioProxy   string
-	workloadMgr     string
-	errors          string
-	engineMgr       string
-	manualNodes     string
-	settings        string
-	clusterMgr      string
-	scheduler       string
-	codexWorker     string
-	codexWorkerPort int
+	scanner           string
+	nodeInfo          string
+	proxy             string
+	lmstudioProxy     string
+	workloadMgr       string
+	errors            string
+	engineMgr         string
+	manualNodes       string
+	settings          string
+	clusterMgr        string
+	scheduler         string
+	codexWorker       string
+	codexWorkerConfig string
+	codexWorkerPort   int
 	// clusterDir is the cluster-manager config dir (node.crt/node.key +
 	// trusted/). Threaded to every worker that does cluster-scoped inter-node
 	// mTLS so they serve/dial pinned peers once this node joins a cluster.
@@ -381,6 +384,7 @@ func NewBroker(codec *Codec, paths workerPaths) *Broker {
 		clusterMgrPath:     paths.clusterMgr,
 		schedulerPath:      paths.scheduler,
 		codexWorker:        paths.codexWorker,
+		codexWorkerConfig:  paths.codexWorkerConfig,
 		codexWorkerPort:    paths.codexWorkerPort,
 		clusterDir:         paths.clusterDir,
 		store:              newDiscoveryStore(),
@@ -691,6 +695,22 @@ func (b *Broker) spawnWorkloadManager() (supervisedHandle, error) {
 	b.rehydrateWorkloadManager(wm)
 	slog.Info("workload-manager started", "path", b.workloadMgrPath, "pid", wm.cmd.Process.Pid)
 	return wm, nil
+}
+
+func (b *Broker) spawnCodexWorker() (supervisedHandle, error) {
+	if b.codexWorker == "" || b.codexWorkerConfig == "" {
+		return nil, fmt.Errorf("managed Codex Worker is not configured")
+	}
+	revision, err := readCodexWorkerConfigRevision(b.codexWorkerConfig)
+	if err != nil {
+		return nil, err
+	}
+	worker, err := startCodexWorker(b.codexWorker, b.codexWorkerConfig, revision)
+	if err != nil {
+		return nil, err
+	}
+	slog.Info("Codex Worker started", "path", b.codexWorker, "pid", worker.cmd.Process.Pid, "configRevision", revision)
+	return worker, nil
 }
 
 // workloadReplayFrame is a lifecycle notification replayed to a (re)started
@@ -1666,6 +1686,18 @@ func (b *Broker) Serve(ctx context.Context) error {
 	defer b.scannerSup.Stop()
 	if b.codexWorkerPort > 0 {
 		b.registerService(noderec.RegisterParams{Service: noderec.ServiceCodexWorker, Port: b.codexWorkerPort})
+	}
+	if b.codexWorker != "" && b.codexWorkerConfig != "" {
+		b.codexWorkerSup = newSupervisor("codex-worker", defaultRestartPolicy(), b.spawnCodexWorker)
+		b.codexWorkerSup.onCrash, b.codexWorkerSup.onRecovered = b.supervisedWorkerCallbacks("codex-worker", func() {})
+		if err := b.codexWorkerSup.Start(); err != nil {
+			slog.Warn("Codex Worker failed to start; continuing without local Codex execution", "path", b.codexWorker, "config", b.codexWorkerConfig, "err", err)
+			b.codexWorkerSup = nil
+		} else {
+			defer b.codexWorkerSup.Stop()
+		}
+	} else {
+		slog.Info("local Codex Worker disabled; no managed Worker config was provided")
 	}
 
 	// nvpair-errors is the service-error datastore and the backbone of the
