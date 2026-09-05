@@ -69,18 +69,33 @@ func (m *Message) IsResponse() bool {
 // Codec handles newline-delimited JSON-RPC 2.0 over an io.ReadWriter.
 // Writes are safe for concurrent use.
 type Codec struct {
-	scanner *bufio.Scanner
-	writer  io.Writer
-	wmu     sync.Mutex
+	scanner                    *bufio.Scanner
+	writer                     io.Writer
+	allowMissingJSONRPCVersion bool
+	wmu                        sync.Mutex
 }
 
 // NewCodec wraps rw with a Codec. Reads accept frames up to 1 MiB.
 func NewCodec(rw io.ReadWriter) *Codec {
+	return newCodec(rw, false)
+}
+
+// NewCodecAllowMissingJSONRPCVersion is for native app-server dialects that
+// emit JSON-RPC-shaped frames without the optional jsonrpc version member.
+// Outbound frames still include jsonrpc: "2.0". Callers must use this only for
+// a protocol whose compatibility contract explicitly permits the omission;
+// normal NVPAIR IPC remains strict via NewCodec.
+func NewCodecAllowMissingJSONRPCVersion(rw io.ReadWriter) *Codec {
+	return newCodec(rw, true)
+}
+
+func newCodec(rw io.ReadWriter, allowMissingJSONRPCVersion bool) *Codec {
 	scanner := bufio.NewScanner(rw)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
 	return &Codec{
-		scanner: scanner,
-		writer:  rw,
+		scanner:                    scanner,
+		writer:                     rw,
+		allowMissingJSONRPCVersion: allowMissingJSONRPCVersion,
 	}
 }
 
@@ -91,11 +106,22 @@ func NewCodec(rw io.ReadWriter) *Codec {
 // (bufio.Scanner cannot resync past an over-long line), so the read loop exits
 // cleanly rather than spinning.
 func NewCodecMaxFrame(rw io.ReadWriter, maxFrame int) *Codec {
+	return newCodecMaxFrame(rw, maxFrame, false)
+}
+
+// NewCodecMaxFrameAllowMissingJSONRPCVersion combines the large-frame limit
+// with the native app-server's optional version-member compatibility.
+func NewCodecMaxFrameAllowMissingJSONRPCVersion(rw io.ReadWriter, maxFrame int) *Codec {
+	return newCodecMaxFrame(rw, maxFrame, true)
+}
+
+func newCodecMaxFrame(rw io.ReadWriter, maxFrame int, allowMissingJSONRPCVersion bool) *Codec {
 	scanner := bufio.NewScanner(rw)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxFrame)
 	return &Codec{
-		scanner: scanner,
-		writer:  rw,
+		scanner:                    scanner,
+		writer:                     rw,
+		allowMissingJSONRPCVersion: allowMissingJSONRPCVersion,
 	}
 }
 
@@ -113,7 +139,7 @@ func (c *Codec) Read() (*Message, error) {
 	if err := json.Unmarshal(c.scanner.Bytes(), &msg); err != nil {
 		return nil, &DecodeError{fmt.Errorf("invalid JSON-RPC message: %w", err)}
 	}
-	if msg.JSONRPC != "2.0" {
+	if msg.JSONRPC != "2.0" && !(c.allowMissingJSONRPCVersion && msg.JSONRPC == "") {
 		return nil, &DecodeError{fmt.Errorf("unsupported JSON-RPC version: %q", msg.JSONRPC)}
 	}
 	return &msg, nil

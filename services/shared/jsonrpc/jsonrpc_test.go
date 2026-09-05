@@ -120,6 +120,21 @@ func TestReadRejectsBadVersionAndEOF(t *testing.T) {
 	}
 }
 
+func TestReadAllowsMissingVersionOnlyInExplicitCompatibilityMode(t *testing.T) {
+	frame := `{"id":1,"result":{"ok":true}}` + "\n"
+	if _, err := readCodec(strings.NewReader(frame)).Read(); err == nil {
+		t.Fatalf("strict codec accepted a frame without jsonrpc version")
+	}
+	c := NewCodecAllowMissingJSONRPCVersion(rw{Reader: strings.NewReader(frame), Writer: io.Discard})
+	msg, err := c.Read()
+	if err != nil {
+		t.Fatalf("compatibility codec rejected native frame: %v", err)
+	}
+	if !msg.IsResponse() || string(msg.Result) != `{"ok":true}` {
+		t.Fatalf("unexpected native frame: %+v", msg)
+	}
+}
+
 func TestReadMalformedFrameIsRecoverableDecodeError(t *testing.T) {
 	// Both bad JSON and a bad version are recoverable *DecodeError so a read
 	// loop can continue rather than treating them as terminal.

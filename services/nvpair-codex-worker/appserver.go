@@ -79,7 +79,8 @@ func (f AppServerFactory) Probe(ctx context.Context, cwd string) error {
 	cleanupChild()
 	waitCh := make(chan error, 1)
 	go func() { waitCh <- cmd.Wait() }()
-	peer := jsonrpc.NewPeer(jsonrpc.NewCodec(&readWriter{Reader: stdout, Writer: stdin}))
+	probeWriter := &probeWriteSignal{Writer: stdin, written: make(chan struct{})}
+	peer := jsonrpc.NewPeer(jsonrpc.NewCodecAllowMissingJSONRPCVersion(&readWriter{Reader: stdout, Writer: probeWriter}))
 	serveDone := make(chan struct{})
 	go func() {
 		defer close(serveDone)
@@ -95,22 +96,66 @@ func (f AppServerFactory) Probe(ctx context.Context, cwd string) error {
 		}
 		return probeErr
 	}
-	result, rpcErr, err := peer.Call(ctx, "initialize", mustJSON(map[string]any{
-		"clientInfo": map[string]string{"name": "nvpair-codex-worker-probe", "version": Version},
-	}))
-	if err != nil {
-		return cleanup(fmt.Errorf("app-server probe initialize: %w", err))
-	}
-	if rpcErr != nil {
-		return cleanup(fmt.Errorf("app-server probe initialize: %s", rpcErr.Message))
-	}
-	if err := validateAppServerInitialize(result); err != nil {
-		return cleanup(err)
+	resultCh := make(chan struct {
+		result json.RawMessage
+		rpcErr *jsonrpc.RPCError
+		err    error
+	}, 1)
+	go func() {
+		result, rpcErr, err := peer.Call(ctx, "initialize", mustJSON(map[string]any{
+			"clientInfo": map[string]string{"name": "nvpair-codex-worker-probe", "version": Version},
+		}))
+		resultCh <- struct {
+			result json.RawMessage
+			rpcErr *jsonrpc.RPCError
+			err    error
+		}{result: result, rpcErr: rpcErr, err: err}
+	}()
+	// Some native Codex CLI builds do not flush the initialize result until the
+	// lifecycle notification is already queued on the same stdio transport.
+	// The notification is valid only after the initialize request has physically
+	// reached the child. Waiting on the writer barrier prevents a scheduler race
+	// from putting initialized before initialize on the wire.
+	select {
+	case <-probeWriter.written:
+	case call := <-resultCh:
+		return cleanup(formatProbeInitializeResult(call.result, call.rpcErr, call.err))
+	case <-ctx.Done():
+		return cleanup(ctx.Err())
 	}
 	if err := peer.Notify("initialized", map[string]any{}); err != nil {
 		return cleanup(fmt.Errorf("app-server probe initialized: %w", err))
 	}
+	call := <-resultCh
+	result, rpcErr, err := call.result, call.rpcErr, call.err
+	if err := formatProbeInitializeResult(result, rpcErr, err); err != nil {
+		return cleanup(err)
+	}
 	return cleanup(nil)
+}
+
+func formatProbeInitializeResult(result json.RawMessage, rpcErr *jsonrpc.RPCError, err error) error {
+	if err != nil {
+		return fmt.Errorf("app-server probe initialize: %w", err)
+	}
+	if rpcErr != nil {
+		return fmt.Errorf("app-server probe initialize: %s", rpcErr.Message)
+	}
+	return validateAppServerInitialize(result)
+}
+
+type probeWriteSignal struct {
+	io.Writer
+	written chan struct{}
+	once    sync.Once
+}
+
+func (w *probeWriteSignal) Write(data []byte) (int, error) {
+	n, err := w.Writer.Write(data)
+	if n == len(data) {
+		w.once.Do(func() { close(w.written) })
+	}
+	return n, err
 }
 
 func (f AppServerFactory) New() *AppServerSession {
@@ -217,7 +262,7 @@ func (s *AppServerSession) runWithThread(ctx context.Context, request codexproto
 	waitCh := make(chan error, 1)
 	go func() { waitCh <- cmd.Wait() }()
 
-	peer := jsonrpc.NewPeer(jsonrpc.NewCodec(&readWriter{Reader: stdout, Writer: stdin}))
+	peer := jsonrpc.NewPeer(jsonrpc.NewCodecAllowMissingJSONRPCVersion(&readWriter{Reader: stdout, Writer: stdin}))
 	s.mu.Lock()
 	s.peer = peer
 	s.mu.Unlock()
@@ -316,12 +361,9 @@ func (s *AppServerSession) runWithThread(ctx context.Context, request codexproto
 		if completed.err != nil {
 			return codexprotocol.Handoff{}, completed.err
 		}
-		var handoff codexprotocol.Handoff
-		if err := json.Unmarshal([]byte(completed.message), &handoff); err != nil {
-			return codexprotocol.Handoff{}, fmt.Errorf("app-server final message is not a handoff: %w", err)
-		}
-		if err := handoff.Validate(request.TaskID, request.AttemptID); err != nil {
-			return codexprotocol.Handoff{}, fmt.Errorf("validate app-server handoff: %w", err)
+		handoff, err := decodeHandoffMessage(completed.message, request.TaskID, request.AttemptID)
+		if err != nil {
+			return codexprotocol.Handoff{}, err
 		}
 		return handoff, nil
 	case <-approvalCh:
@@ -349,6 +391,33 @@ func (s *AppServerSession) runWithThread(ctx context.Context, request codexproto
 		}
 		return codexprotocol.Handoff{}, fmt.Errorf("app-server exited before completion: %w", err)
 	}
+}
+
+// decodeHandoffMessage accepts a verified JSON handoff embedded in otherwise
+// conversational output. Native Codex versions can occasionally prepend a
+// short progress sentence even when an output schema is supplied. Every
+// candidate remains subject to the task/attempt fence and Handoff.Validate;
+// unverified text is never returned as a task result.
+func decodeHandoffMessage(message, taskID, attemptID string) (codexprotocol.Handoff, error) {
+	if len(message) > codexprotocol.MaxHandoffBytes {
+		return codexprotocol.Handoff{}, fmt.Errorf("app-server final message exceeds %d bytes", codexprotocol.MaxHandoffBytes)
+	}
+	for offset := 0; offset < len(message); {
+		relative := strings.IndexByte(message[offset:], '{')
+		if relative < 0 {
+			break
+		}
+		start := offset + relative
+		decoder := json.NewDecoder(strings.NewReader(message[start:]))
+		var handoff codexprotocol.Handoff
+		if err := decoder.Decode(&handoff); err == nil {
+			if err := handoff.Validate(taskID, attemptID); err == nil {
+				return handoff, nil
+			}
+		}
+		offset = start + 1
+	}
+	return codexprotocol.Handoff{}, errors.New("app-server final message is not a verified handoff")
 }
 
 // validateAppServerInitialize is the adapter's fail-closed compatibility
@@ -692,14 +761,34 @@ func turnPrompt(request codexprotocol.TaskRequest) string {
 }
 
 func handoffSchema() map[string]any {
+	object := func(properties map[string]any, required []string) map[string]any {
+		return map[string]any{
+			"type":                 "object",
+			"additionalProperties": false,
+			"properties":           properties,
+			"required":             required,
+		}
+	}
 	return map[string]any{
 		"type": "object", "additionalProperties": false,
 		"properties": map[string]any{
 			"version": map[string]any{"type": "integer"}, "taskId": map[string]any{"type": "string"}, "attemptId": map[string]any{"type": "string"},
 			"status": map[string]any{"type": "string", "enum": []string{"completed", "blocked", "failed", "cancelled", "lost"}}, "summary": map[string]any{"type": "string"},
-			"findings": map[string]any{"type": "array"}, "changes": map[string]any{"type": "array"}, "verification": map[string]any{"type": "array"}, "artifacts": map[string]any{"type": "array"}, "recommendedNext": map[string]any{"type": "string"},
+			"findings": map[string]any{"type": "array", "items": object(map[string]any{
+				"severity": map[string]any{"type": "string"}, "location": map[string]any{"type": "string"}, "detail": map[string]any{"type": "string"},
+			}, []string{"severity", "location", "detail"})},
+			"changes": map[string]any{"type": "array", "items": object(map[string]any{
+				"path": map[string]any{"type": "string"}, "summary": map[string]any{"type": "string"},
+			}, []string{"path", "summary"})},
+			"verification": map[string]any{"type": "array", "items": object(map[string]any{
+				"command": map[string]any{"type": "string"}, "outcome": map[string]any{"type": "string"}, "artifactId": map[string]any{"type": "string"},
+			}, []string{"command", "outcome", "artifactId"})},
+			"artifacts": map[string]any{"type": "array", "items": object(map[string]any{
+				"id": map[string]any{"type": "string"}, "name": map[string]any{"type": "string"}, "sha256": map[string]any{"type": "string"}, "bytes": map[string]any{"type": "integer"},
+			}, []string{"id", "name", "sha256", "bytes"})},
+			"recommendedNext": map[string]any{"type": "string"},
 		},
-		"required": []string{"version", "taskId", "attemptId", "status", "summary"},
+		"required": []string{"version", "taskId", "attemptId", "status", "summary", "findings", "changes", "verification", "artifacts", "recommendedNext"},
 	}
 }
 

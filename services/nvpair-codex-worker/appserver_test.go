@@ -215,6 +215,68 @@ func TestAppServerProbeRejectsUnsupportedInitializeResponse(t *testing.T) {
 	}
 }
 
+func TestHandoffSchemaUsesStrictArrayItems(t *testing.T) {
+	schema := handoffSchema()
+	properties, ok := schema["properties"].(map[string]any)
+	if !ok {
+		t.Fatal("handoff schema properties are missing")
+	}
+	required := stringSet(schema["required"])
+	for name, value := range properties {
+		if !required[name] {
+			t.Fatalf("handoff schema property %q is not required by strict response schema", name)
+		}
+		property, ok := value.(map[string]any)
+		if !ok || property["type"] != "array" {
+			continue
+		}
+		items, ok := property["items"].(map[string]any)
+		if !ok {
+			t.Fatalf("handoff array %q has no items schema", name)
+		}
+		itemProperties, ok := items["properties"].(map[string]any)
+		if !ok {
+			t.Fatalf("handoff array %q item properties are missing", name)
+		}
+		itemRequired := stringSet(items["required"])
+		for itemName := range itemProperties {
+			if !itemRequired[itemName] {
+				t.Fatalf("handoff array %q item property %q is not required", name, itemName)
+			}
+		}
+	}
+}
+
+func TestDecodeHandoffMessageValidatesEmbeddedJSON(t *testing.T) {
+	message := `I checked the repository. {"version":1,"taskId":"task-1","attemptId":"attempt-1","status":"completed","summary":"clean","findings":[],"changes":[],"verification":[],"artifacts":[],"recommendedNext":"none"}`
+	handoff, err := decodeHandoffMessage(message, "task-1", "attempt-1")
+	if err != nil {
+		t.Fatalf("decode embedded handoff: %v", err)
+	}
+	if handoff.Status != codexprotocol.StateCompleted || handoff.Summary != "clean" {
+		t.Fatalf("unexpected handoff: %+v", handoff)
+	}
+}
+
+func TestDecodeHandoffMessageRejectsWrongFence(t *testing.T) {
+	message := `{"version":1,"taskId":"other","attemptId":"attempt-1","status":"completed","summary":"clean"}`
+	if _, err := decodeHandoffMessage(message, "task-1", "attempt-1"); err == nil {
+		t.Fatal("accepted handoff for a different task")
+	}
+}
+
+func stringSet(value any) map[string]bool {
+	values, ok := value.([]string)
+	if !ok {
+		return nil
+	}
+	set := make(map[string]bool, len(values))
+	for _, value := range values {
+		set[value] = true
+	}
+	return set
+}
+
 func TestAppServerAdapterResumesPersistedThreadForFollowUp(t *testing.T) {
 	t.Setenv("CODEX_FAKE_APP_SERVER", "1")
 	factory := NewAppServerFactory(buildFakeAppServer(t))
