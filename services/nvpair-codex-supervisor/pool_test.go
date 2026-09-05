@@ -99,3 +99,22 @@ func TestWorkerPoolReplacesAndRemovesLocalTarget(t *testing.T) {
 		t.Fatalf("snapshot after local removal=%#v", snapshot)
 	}
 }
+
+func TestWorkerPoolReplacesOnlyDiscoveredTargets(t *testing.T) {
+	pool := NewWorkerPool([]WorkerTarget{
+		{ID: "local", Source: workerSourceLocal, Client: fakeWorkerClient{}},
+		{ID: "static", Source: workerSourceStatic, Client: fakeWorkerClient{}},
+		{ID: "old-remote", Source: workerSourceDiscovery, Client: fakeWorkerClient{}},
+	})
+	pool.ReplaceDiscoveredTargets([]WorkerTarget{{ID: "new-remote", Client: fakeWorkerClient{}}})
+	snapshot := pool.Snapshot()
+	if len(snapshot) != 3 {
+		t.Fatalf("snapshot=%#v, want local, static, new-remote", snapshot)
+	}
+	if snapshot[0].ID != "local" || snapshot[1].ID != "new-remote" || snapshot[2].ID != "static" {
+		t.Fatalf("snapshot order/content=%#v", snapshot)
+	}
+	if snapshot[1].Source != workerSourceDiscovery {
+		t.Fatalf("discovered replacement source=%q", snapshot[1].Source)
+	}
+}

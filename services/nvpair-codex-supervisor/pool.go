@@ -17,11 +17,18 @@ import (
 
 type WorkerTarget struct {
 	ID           string
+	Source       string
 	Client       WorkerClient
 	Capabilities codexprotocol.WorkerCapabilities
 	Assigned     uint64
 	LastError    string
 }
+
+const (
+	workerSourceLocal     = "local"
+	workerSourceStatic    = "static"
+	workerSourceDiscovery = "discovery"
+)
 
 type WorkerRequirements struct {
 	WorkerID     string
@@ -39,6 +46,15 @@ type WorkerPool struct {
 
 func NewWorkerPool(targets []WorkerTarget) *WorkerPool {
 	copyTargets := append([]WorkerTarget(nil), targets...)
+	for i := range copyTargets {
+		if copyTargets[i].Source == "" {
+			if copyTargets[i].ID == "local" {
+				copyTargets[i].Source = workerSourceLocal
+			} else {
+				copyTargets[i].Source = workerSourceStatic
+			}
+		}
+	}
 	sort.Slice(copyTargets, func(i, j int) bool { return copyTargets[i].ID < copyTargets[j].ID })
 	return &WorkerPool{targets: copyTargets}
 }
@@ -140,8 +156,38 @@ func (p *WorkerPool) SetLocalTarget(target *WorkerTarget) {
 	}
 	p.targets = filtered
 	if target != nil {
+		target.Source = workerSourceLocal
 		p.targets = append(p.targets, *target)
 	}
+	sort.Slice(p.targets, func(i, j int) bool { return p.targets[i].ID < p.targets[j].ID })
+}
+
+// ReplaceDiscoveredTargets updates only the discovery-backed remote set. Local
+// runtime and explicitly configured endpoint targets remain intact, while a
+// disappeared or de-pinned discovered Worker is removed from new scheduling.
+// Existing task owners are retained separately by MCPServer for status/result
+// recovery; this pool operation only controls future selection.
+func (p *WorkerPool) ReplaceDiscoveredTargets(targets []WorkerTarget) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	assigned := make(map[string]uint64)
+	for _, current := range p.targets {
+		if current.Source == workerSourceDiscovery {
+			assigned[current.ID] = current.Assigned
+		}
+	}
+	retained := p.targets[:0]
+	for _, current := range p.targets {
+		if current.Source != workerSourceDiscovery {
+			retained = append(retained, current)
+		}
+	}
+	for _, target := range targets {
+		target.Source = workerSourceDiscovery
+		target.Assigned = assigned[target.ID]
+		retained = append(retained, target)
+	}
+	p.targets = retained
 	sort.Slice(p.targets, func(i, j int) bool { return p.targets[i].ID < p.targets[j].ID })
 }
 

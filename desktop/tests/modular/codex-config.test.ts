@@ -108,4 +108,20 @@ describe('Codex config defaults', () => {
         expect(fs.statSync(path.join(root, 'codex', 'worker-config.json')).mode & 0o077).toBe(0)
         expect(fs.readFileSync(path.join(root, 'codex', 'config.json'), 'utf8')).not.toContain('authToken')
     })
+
+    it('reports Main Codex activation separately from a written registration', () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pair-manager-registration-'))
+        const mainCodex = path.join(root, 'main-codex')
+        const manager = new CodexManager(root, '/pair/supervisor', mainCodex)
+        const applied = manager.applyMcpRegistration()
+        expect(applied.state).toBe('waiting_for_main')
+
+        const management = path.join(root, 'codex', 'management')
+        fs.mkdirSync(management, { recursive: true, mode: 0o700 })
+        fs.writeFileSync(
+            path.join(management, `supervisor-${process.pid}.json`),
+            JSON.stringify({ schemaVersion: 1, pid: process.pid, socketPath: path.join(management, 'supervisor.sock') })
+        )
+        expect(manager.getMcpRegistration().state).toBe('connected')
+    })
 })

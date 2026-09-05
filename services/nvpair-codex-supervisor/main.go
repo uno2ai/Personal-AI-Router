@@ -53,6 +53,9 @@ func main() {
 	server.SetTaskIndex(index)
 	managementCtx, stopManagement := context.WithCancel(context.Background())
 	defer stopManagement()
+	if *discoveryFile != "" {
+		server.StartDiscoveryWatcher(managementCtx, *clusterDir, *discoveryFile)
+	}
 	if *managementSocketDir != "" {
 		socketPath := ManagementSocketPath(*managementSocketDir, os.Getpid())
 		removeRegistry, err := WriteManagementRegistry(*managementSocketDir, socketPath, os.Getpid())
@@ -87,7 +90,7 @@ func parseWorkerTargets(loopbackURL, endpoints, token, clusterDir, discoveryFile
 		if err != nil {
 			return nil, err
 		}
-		targets = append(targets, WorkerTarget{ID: "local", Client: client})
+		targets = append(targets, WorkerTarget{ID: "local", Source: workerSourceLocal, Client: client})
 	}
 	if endpoints != "" {
 		if clusterDir == "" {
@@ -110,7 +113,7 @@ func parseWorkerTargets(loopbackURL, endpoints, token, clusterDir, discoveryFile
 			if err != nil {
 				return nil, fmt.Errorf("Worker %s: %w", id, err)
 			}
-			targets = append(targets, WorkerTarget{ID: strings.TrimSpace(id), Client: client})
+			targets = append(targets, WorkerTarget{ID: strings.TrimSpace(id), Source: workerSourceStatic, Client: client})
 		}
 	}
 	if discoveryFile != "" {
@@ -125,6 +128,9 @@ func parseWorkerTargets(loopbackURL, endpoints, token, clusterDir, discoveryFile
 		discovered, err := NewWorkerDiscovery(mesh).Discover(context.Background(), nodes)
 		if err != nil {
 			return nil, err
+		}
+		for i := range discovered {
+			discovered[i].Source = workerSourceDiscovery
 		}
 		targets = append(targets, discovered...)
 	}

@@ -106,7 +106,7 @@ export class CodexManager {
         try {
             const current = getMcpRegistration(configPath)
             return {
-                state: current ? 'registered' : 'unregistered',
+                state: current ? (this.hasRunningSupervisor() ? 'connected' : 'waiting_for_main') : 'unregistered',
                 path: configPath,
                 command: current?.command ?? null,
                 args: current?.args ?? [],
@@ -252,6 +252,27 @@ export class CodexManager {
 
     private mainConfigPath(): string {
         return path.join(this.codexHome, 'config.toml')
+    }
+
+    private hasRunningSupervisor(): boolean {
+        const directory = path.join(this.userDataRoot, 'codex', 'management')
+        if (!fs.existsSync(directory)) return false
+        for (const name of fs.readdirSync(directory)) {
+            if (!name.startsWith('supervisor-') || !name.endsWith('.json')) continue
+            try {
+                const registry = JSON.parse(fs.readFileSync(path.join(directory, name), 'utf8')) as {
+                    schemaVersion?: unknown
+                    pid?: unknown
+                    socketPath?: unknown
+                }
+                if (registry.schemaVersion !== 1 || typeof registry.pid !== 'number' || typeof registry.socketPath !== 'string') continue
+                process.kill(registry.pid, 0)
+                return true
+            } catch {
+                // A stale registry or an exited Supervisor is waiting_for_main.
+            }
+        }
+        return false
     }
 
     private async callManagement(request: Record<string, unknown>): Promise<Record<string, unknown>> {

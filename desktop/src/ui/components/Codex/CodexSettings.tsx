@@ -17,6 +17,14 @@ const STATUS_LABELS: Record<string, string> = {
     stopped: 'Stopped'
 }
 
+const REGISTRATION_LABELS: Record<string, string> = {
+    unregistered: 'Unregistered',
+    registered: 'Registered',
+    waiting_for_main: 'Waiting for Main Codex',
+    connected: 'Connected',
+    failed: 'Failed'
+}
+
 export default function CodexSettings() {
     const { state, loading, error, refresh, configureWorker, setWorkerEnabled, applyRegistration, removeRegistration } =
         useCodexStore()
@@ -119,8 +127,8 @@ export default function CodexSettings() {
                 <Stack gap="4">
                     <Flex align="center" justify="between" gap="3">
                         <Text kind="body/semibold/md">Main Codex MCP</Text>
-                        <Badge color={registration?.state === 'registered' ? 'green' : 'gray'} kind="solid">
-                            {registration?.state ?? 'Unregistered'}
+                        <Badge color={registration?.state === 'connected' ? 'green' : 'gray'} kind="solid">
+                            {REGISTRATION_LABELS[registration?.state ?? 'unregistered'] ?? 'Unknown'}
                         </Badge>
                     </Flex>
                     <Text kind="body/regular/sm" className="text-subtle-color">

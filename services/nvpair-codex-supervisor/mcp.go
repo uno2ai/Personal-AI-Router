@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"nvpair-shared/clustertrust"
 	"nvpair-shared/codexprotocol"
 	"nvpair-shared/jsonrpc"
 )
@@ -50,6 +51,48 @@ func (s *MCPServer) SetTaskIndex(index *TaskIndex) {
 	s.mu.Lock()
 	s.index = index
 	s.mu.Unlock()
+}
+
+func (s *MCPServer) SetDiscoveredWorkers(targets []WorkerTarget) {
+	s.pool.ReplaceDiscoveredTargets(targets)
+}
+
+// StartDiscoveryWatcher keeps the remote Worker set live for the lifetime of
+// the Main-owned Supervisor. The discovery snapshot is only a hint: every
+// candidate is re-probed over pinned mTLS before it enters the pool, and a
+// successful snapshot with a removed pin intentionally clears that candidate.
+func (s *MCPServer) StartDiscoveryWatcher(ctx context.Context, clusterDir, discoveryFile string) {
+	if strings.TrimSpace(clusterDir) == "" || strings.TrimSpace(discoveryFile) == "" {
+		return
+	}
+	mesh := clustertrust.Open(clusterDir)
+	discovery := NewWorkerDiscovery(mesh)
+	refresh := func() {
+		nodes, err := readDiscoveryNodes(discoveryFile)
+		if err != nil {
+			return
+		}
+		probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		targets, err := discovery.Discover(probeCtx, nodes)
+		cancel()
+		if err != nil {
+			return
+		}
+		s.SetDiscoveredWorkers(targets)
+	}
+	refresh()
+	go func() {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				refresh()
+			}
+		}
+	}()
 }
 
 type mcpReadWriter struct {
