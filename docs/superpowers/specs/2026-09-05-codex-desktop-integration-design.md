@@ -1,8 +1,13 @@
 # Codex Desktop Integration Design
 
-**Status:** Draft for implementation review  
+**Status:** Blocked pending contract and security gates
 **Date:** 2026-09-05  
 **Parent design:** [Codex Supervisor Pair Control Plane](2026-09-04-codex-supervisor-pair-control-plane.md)
+
+**Last review:** Astra max adversarial review of the desktop integration design.
+The top-level process ownership split remains viable, but implementation is
+intentionally blocked until the contracts and security gates recorded below are
+closed.
 
 ## 1. Decision summary
 
@@ -61,6 +66,32 @@ The parent control-plane specification's statement that desktop/preload
 contracts remain unchanged is a valid boundary for the standalone backend, but
 it cannot also be used as the completion criterion for the desktop product.
 This design explicitly adds the desktop integration scope.
+
+### 2.1 Astra max review disposition
+
+The review result is **blocked for implementation planning**, not rejected at
+the architecture level. The following distinction is important:
+
+- **Retained decision:** Electron owns the broker and Desktop state; Main Codex
+  owns every Supervisor MCP stdio session; Workers remain the execution and
+  policy boundary.
+- **P0 contract gaps:** local Worker bootstrap and authenticated endpoint
+  handoff; supported Main Codex client/config/reload behavior; Supervisor
+  instance multiplicity and private management; broker-to-Worker lifecycle
+  protocol.
+- **P0 security gaps:** isolated child Codex configuration; renderer origin,
+  frame, and schema enforcement; task-owner binding; pre-dispatch durable
+  intent and uncertain-ACK recovery; process-tree termination proof; stable
+  workspace identity; journal poisoning and cross-Worker lease fencing.
+- **P1 operational gaps:** dynamic discovery and revocation semantics;
+  local-versus-remote transport; metadata DTOs and freshness; scoped
+  installer/update/uninstall behavior; non-empty packaged Main/Codex smoke
+  tests.
+
+The existing repository does not yet provide these properties merely because
+the binaries build or the backend unit tests pass. The implementation plan
+must therefore start with contract and adversarial tests, then wire the
+desktop surface only after those gates are green.
 
 ## 3. Goals
 
@@ -126,27 +157,35 @@ task HTTP traffic:
 ```text
 broker -> Worker control stdin:  start/stop/status messages
 Worker -> broker control stdout: ready/status/stopped messages
-broker <-> Worker task HTTP:    loopback bearer or configured mTLS
+Supervisor -> Worker task HTTP: loopback or configured mTLS
+broker <-> Worker control:       lifecycle and bounded status only
 ```
 
 The managed mode must handle parent EOF and explicit shutdown. Standalone
-service mode must continue to work without a parent pipe. Control messages must
-contain no task objective, context, prompt, response, artifact body, or
-credential.
+service mode must continue to work without a parent pipe. The control protocol
+is versioned and has explicit schemas for `start`, `status`, `drain`,
+`shutdown`, `configRevision`, and `stopped`; it contains no task objective,
+context, prompt, response, artifact body, or credential. Configuration changes
+are revisioned: the broker drains the old Worker, withdraws its readiness, and
+starts a new boot epoch rather than mutating a live execution policy.
 
 Worker readiness is a structured record:
 
 ```json
 {
   "generation": "uuid",
-  "transport": "loopback-bearer",
-  "endpoint": "http://127.0.0.1:random-port",
+  "transport": "pinned-local-tls",
+  "endpoint": "https://127.0.0.1:random-port",
   "protocolVersion": 1,
   "appServerVersion": "codex-app-server-v1",
   "workspace": "configured alias",
   "codexExecutable": "/absolute/path/codex",
   "codexExecutableVersion": "0.153.2",
   "account": "os-user",
+  "installationId": "...",
+  "workerInstanceId": "...",
+  "bootEpoch": 7,
+  "policyRevision": 12,
   "state": "ready"
 }
 ```
@@ -155,6 +194,22 @@ Worker readiness is a structured record:
 validated, the Codex executable is discoverable and compatible, the effective
 policy is valid, and the configured account can initialize the app-server. A
 live TCP listener alone is `starting` or `unavailable`, never `ready`.
+
+The broker must publish this record through a protected, versioned runtime
+descriptor before the Supervisor can connect. The descriptor includes the
+installation and Worker instance identity, boot epoch, endpoint, transport,
+credential reference and generation, policy revision, and expiry. It contains
+no bearer token or private key. Endpoint rotation invalidates the previous
+generation and stale descriptors are rejected. Production local transport is
+pinned local TLS (or an equivalent authenticated local channel); a bare
+loopback bearer is a development-only fallback because it authenticates the
+caller but not the server.
+
+If one Worker serves both local and remote Supervisors, the implementation must
+use one authenticated transport that covers both paths or two explicitly
+isolated listeners and policy surfaces. A process-wide exclusive
+"bearer-or-mTLS" switch is not sufficient for simultaneous local and remote
+operation.
 
 The broker registers `cw` only for a ready, explicitly remote-enabled Worker
 with an authenticated mTLS listener and an explicit Supervisor ACL. A local
@@ -166,6 +221,14 @@ The Supervisor remains a command-based local MCP server. PAIR Desktop manages a
 named registration such as `pair-codex-supervisor` using an absolute packaged
 path and explicit arguments. Main Codex launches that command when the user
 conversation invokes the tools.
+
+The v1 support matrix must name the exact Main Codex client, executable
+versions, operating-system user/session, and configuration scope. The initial
+contract is a native Main Codex process running as the same user and using the
+effective local `CODEX_HOME`; WSL, remote Main sessions, and alternate config
+roots are unsupported until they have a separate transport and ownership
+contract. The registration manager must resolve the effective config path and
+precedence rather than assuming a single file.
 
 The registration manager runs in Electron's main process and must:
 
@@ -180,9 +243,19 @@ The registration manager runs in Electron's main process and must:
    connection.
 6. Remove only the PAIR-managed entry when the user disables the integration.
 
-The Supervisor must not expose a TCP listener. Desktop status access uses a
+Registration and activation are separate states. The manager records the
+config fingerprint and managed entry version, detects concurrent edits, and
+states whether the currently running Main loaded the entry. The supported
+activation path is an explicit Main restart/reload operation; a file write must
+never be reported as tool availability. A registration test is only valid when
+the real supported Main client loads the entry and invokes `workers.list`.
+
+Each Main MCP session owns one Supervisor instance. The Supervisor must not
+expose a public TCP listener. Desktop status access uses a per-instance,
 private, same-user Unix-domain socket or Windows named pipe opened by the
-Supervisor in addition to MCP stdio. The management protocol is narrow:
+Supervisor in addition to MCP stdio. Each instance has a unique instance ID,
+endpoint, registry record, and task-index namespace. The management protocol
+is narrow:
 
 - `status`: Supervisor health and connection state;
 - `workers.list`: authenticated capability summaries;
@@ -190,22 +263,40 @@ Supervisor in addition to MCP stdio. The management protocol is narrow:
   latest sequence;
 - `tasks.cancel`: a validated task/attempt/epoch cancellation request.
 
-The management channel never carries task context, prompts, responses, raw
-transcripts, or artifact contents. Worker journals remain authoritative. The
-Supervisor persists its destination and task-owner index so Desktop can restore
-history after restart without authorizing replay.
+The endpoint is protected by 0700 Unix permissions or an explicit Windows
+same-user ACL plus peer identity verification; a generic named-pipe/listener
+helper is not sufficient by itself. The Supervisor registry and task index use
+an interprocess lock and recover stale endpoints. The management channel never
+carries task context, prompts, responses, raw transcripts, or artifact
+contents. Worker journals remain authoritative. The Supervisor persists its
+destination and task-owner index so Desktop can restore history after restart
+without authorizing replay. A task index persists the complete pre-dispatch
+intent and selected destination before sending the first request, then records
+uncertain acknowledgement and recovery state instead of silently creating a
+new task.
 
 ### 6.3 Discovery
 
-The broker publishes a private, atomically replaced runtime descriptor containing
-the authenticated PAIR directory snapshot required by Supervisor discovery:
+Local managed Worker publication and remote discovery hints are separate
+records. The broker publishes a private, atomically replaced local runtime
+descriptor containing the authenticated endpoint needed by the Supervisor:
 
 ```json
 {
   "schemaVersion": 1,
+  "installationId": "...",
+  "workerInstanceId": "...",
+  "bootEpoch": 7,
   "generation": 42,
   "writtenAt": "2026-09-05T00:00:00Z",
   "expiresAt": "2026-09-05T00:00:10Z",
+  "localWorker": {
+    "endpoint": "https://127.0.0.1:random-port",
+    "transport": "pinned-local-tls",
+    "credentialRef": "runtime/worker-credential",
+    "credentialGeneration": 3,
+    "policyRevision": 12
+  },
   "nodes": [
     {
       "hostUuid": "...",
@@ -219,10 +310,19 @@ the authenticated PAIR directory snapshot required by Supervisor discovery:
 }
 ```
 
-This is an address hint, not authorization. Supervisor still refreshes Mesh,
-presents its certificate, pins the Worker certificate, verifies the Worker ACL,
-and requires two consecutive matching authenticated probes before selecting a
-new identity.
+The descriptor is an address hint, not authorization. Supervisor still
+authenticates the local Worker, refreshes Mesh for remote candidates, presents
+its certificate, pins the Worker certificate, verifies the Worker ACL, and
+requires two consecutive matching authenticated probes before selecting a new
+remote identity. Independent Worker installations must advertise an explicit
+supported `cw` endpoint; discovery must not infer port 14324 by scanning.
+
+The pool has explicit heartbeat/expiry, probe-round, pin-rotation, failed-probe
+reset, duplicate-identity, and replacement rules. A `cw` capability is bound
+to a Worker installation and instance epoch, not merely a host UUID. v1 either
+allows one Worker installation per node or defines a deterministic selection
+and authorization rule; it must not silently merge multiple Workers behind
+one node identity.
 
 Supervisor remains alive with an empty pool when no Worker is ready. It reloads
 the descriptor on generation changes and periodically retries candidates. A
@@ -233,6 +333,14 @@ single initial snapshot cannot permanently make all Workers unavailable.
 When the same user runs Main Codex and Worker Codex, the Worker child receives an
 explicit isolated Codex configuration that does not inherit the Supervisor MCP
 registration. The Worker must not be able to delegate through Main's tools.
+
+The isolation contract names the child `CODEX_HOME`, config files, plugins,
+hooks, credentials/auth source, environment allowlist, history location, MCP
+allowlist, and filesystem roots. Excluding one Supervisor entry is not enough:
+layered configuration and inherited plugins/hooks must also be excluded or
+explicitly allowed. The Worker policy is a hard ceiling enforced on every task
+creation and follow-up; a Desktop read-only setting cannot be widened by a
+request, remote identity, or child configuration.
 
 The Worker also needs these hardening gates before Desktop readiness is trusted:
 
@@ -249,6 +357,12 @@ The Worker also needs these hardening gates before Desktop readiness is trusted:
 - journal write/sync uncertainty poisons admission until controlled recovery;
 - task reads/cancel/follow-up are bound to the authenticated owner or an
   explicitly documented shared-administration policy.
+- task state separates `taskState`, `cleanupState`, and `leaseHeld`; a `lost`
+  task with unconfirmed cleanup is not eligible for reassignment;
+- local recovery can inspect and fence an orphaned attempt without replaying its
+  side effects;
+- workspace admission uses a stable filesystem identity and an exclusive
+  cross-process lease, not only a path string or process-local mutex.
 
 ## 7. Desktop configuration and UI
 
@@ -296,6 +410,14 @@ All renderer input is schema-validated in the main process. No generic command
 execution API is exposed. Tokens, private keys, task bodies, and filesystem
 contents never enter renderer state or generic subprocess logging.
 
+The main-process IPC boundary also enforces an exact allowed renderer origin,
+the top-level frame (not only `webContents`), and a non-empty runtime schema
+before any privileged Codex operation. The allowlist must fail closed when the
+renderer URL is unset; `file://` or an arbitrary recognized window URL is not a
+substitute for an exact origin. Task cancellation uses an opaque capability or
+validated task/attempt/epoch reference and an idempotency key rather than a
+renderer-supplied process identifier.
+
 ## 8. Packaging and platform lifecycle
 
 The desktop inventory becomes 15 shipped components:
@@ -310,7 +432,14 @@ The desktop inventory becomes 15 shipped components:
   target architecture, and final package verification;
 - keep the standalone services installer for remote Worker hosts;
 - do not add an inbound firewall rule for local-only mode;
-- add a scoped Worker firewall rule only when the user enables remote mode.
+- add a scoped Worker firewall rule only when the user enables remote mode;
+- use versioned, installation-owned binaries and a post-signing manifest;
+- never stop processes by global image name; cleanup is limited to recorded
+  process IDs/jobs/services owned by this installation;
+- preserve or explicitly drain Main-owned Supervisor instances during Desktop
+  upgrade before replacing their binary;
+- make service accounts, state ACLs, firewall ownership, and uninstall scope
+  explicit for each platform.
 
 State belongs under the existing per-user PAIR data root:
 
@@ -347,7 +476,30 @@ Platform-specific requirements:
   process-group cleanup, environment/path validation, restart limits, and
   package pre-removal coordination.
 
-## 9. Implementation phases
+## 9. Implementation gates and phases
+
+Implementation is blocked until these gates have executable contracts and
+adversarial tests:
+
+1. **Contract gate:** supported Main client/config scope, instance multiplicity,
+   transport/authentication, owner policy, workspace identity, schemas, and
+   shutdown/recovery semantics are fixed.
+2. **Worker safety gate:** child isolation, policy ceiling, owner binding,
+   cancellation/process containment, stable filesystem checks, journal
+   durability, idempotency, and local orphan recovery are proven.
+3. **Broker lifecycle gate:** asynchronous managed Worker control, protected
+   endpoint publication, truthful readiness/capacity, EOF/crash handling, and
+   bounded drain are proven.
+4. **Supervisor gate:** empty-pool startup, dynamic authenticated discovery,
+   durable pre-dispatch recovery, multi-instance management, and independent
+   Worker advertisement are proven.
+5. **Desktop/Main gate:** exact origin/schema checks, typed UI/IPC, toggle
+   combinations, and real Main registration/load/tool invocation are proven.
+6. **Installer gate:** scoped coexistence, upgrade/uninstall, conditional
+   firewall behavior, state preservation, and final binary manifests are
+   proven.
+7. **Release gate:** every claimed platform has a non-empty packaged native
+   acceptance suite with a supported Main/Codex version.
 
 ### Phase 0 — Scope and backend hardening
 
@@ -401,16 +553,17 @@ claimed platform matrix:
 4. Invalid workspace, missing executable, missing login, incompatible app-server,
    and occupied-port conditions produce actionable states without preventing
    normal PAIR startup.
-5. Main Codex can apply the managed MCP registration, start the packaged
-   Supervisor over stdio, call `workers.list`, and delegate a bounded read-only
-   task to a local or remote Worker.
+5. The supported real Main Codex client can apply or reload the managed MCP
+   registration, start the packaged Supervisor over stdio, call `workers.list`,
+   and delegate a bounded read-only task to a local or remote Worker.
 6. A real native app-server child runs with the configured account, workspace,
    and effective restrictive policy; exactly one side-effecting turn occurs.
 7. The UI restores task identity and state after window close, broker restart,
    Supervisor restart, and application upgrade without duplicate rows or work.
-8. A paired but unauthorized Main cannot delegate; removing a pin rejects new
-   requests and cancels affected active work within the controlled five-second
-   bound after confirmed process-tree cleanup.
+8. A paired but unauthorized Main cannot delegate; removing a pin creates a
+   durable revocation record, rejects new requests, and cancels affected active
+   work within the controlled five-second bound measured from confirmed
+   revocation observation and process-tree cleanup.
 9. Worker discovery changes are reflected without restarting Main Codex or
    editing a manual snapshot; an empty pool remains a usable waiting state.
 10. Approval-required work becomes an honest terminal blocked state with local
@@ -427,6 +580,33 @@ claimed platform matrix:
 15. Removing PAIR Desktop does not terminate or delete an independently managed
     remote Worker installation.
 
+The following additional oracles are mandatory; the original list above is
+necessary but not sufficient:
+
+16. The supported Main client, effective config path, config fingerprint,
+    reload/restart behavior, and currently connected Supervisor instance are
+    observable; a successful JSON/config write alone cannot pass.
+17. Two concurrent Main sessions receive two isolated Supervisor instances with
+    distinct management endpoints, task indexes, and cancellation scopes.
+18. A local Worker endpoint rotates credentials and boot epoch; stale runtime
+    descriptors and stale endpoint generations are rejected.
+19. A Worker child cannot load Main's MCP entry through layered config,
+    plugins, hooks, environment, credentials, or history paths.
+20. A lost response after durable pre-dispatch intent does not create a second
+    task or reassign the workspace; recovery reports the uncertain outcome.
+21. Cancellation proves descendant cleanup or reports `cleanupState=unconfirmed`
+    and retains the lease; it never reports a clean terminal state based only on
+    a leader-process exit.
+22. Two Worker processes with different journals cannot acquire the same
+    workspace lease, including symlink/reparse replacement and `.` paths.
+23. Renderer navigation, child frames, malformed IPC, and unset renderer URL
+    cannot reach privileged Codex configuration, registration, or cancellation.
+24. Local-only, remote-enabled, read-only, read-write, disabled, and broker
+    crash/restart combinations each produce the documented state and capability
+    set.
+25. Upgrade and uninstall leave unrelated Worker installations, Main config
+    entries, processes, firewall rules, and user data untouched.
+
 ## 11. Design review checklist
 
 - [x] Six independent reviews completed against the current fork commit.
@@ -437,6 +617,16 @@ claimed platform matrix:
 - [x] Discovery bootstrap, readiness, approval, and packaged E2E gaps captured.
 - [x] Windows/macOS/Linux lifecycle and independent remote Worker ownership
       included.
+- [x] Astra max review consolidated into explicit contract, security, installer,
+      and release gates.
+- [ ] Local runtime descriptor, endpoint credential generation, and transport
+      contract.
+- [ ] Supported Main client/config/reload contract and multi-instance registry.
+- [ ] Worker child isolation, owner binding, pre-dispatch recovery, process
+      cleanup proof, and cross-process workspace fencing.
+- [ ] Broker managed-control protocol and dynamic discovery/revocation contract.
+- [ ] Exact renderer origin/frame/schema enforcement and typed IPC implementation.
+- [ ] Scoped installer/update/uninstall behavior and non-empty packaged native
+      acceptance suites.
 - [ ] User review of this written design.
 - [ ] Implementation plan and code changes.
-
