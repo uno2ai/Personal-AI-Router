@@ -160,6 +160,7 @@ type Broker struct {
 	settingsPath      string
 	clusterMgrPath    string
 	schedulerPath     string
+	codexWorker       string
 	codexWorkerPort   int
 	clusterDir        string
 	// Managed-port state is prepared before proxy startup and read by the proxy
@@ -338,6 +339,7 @@ type workerPaths struct {
 	settings        string
 	clusterMgr      string
 	scheduler       string
+	codexWorker     string
 	codexWorkerPort int
 	// clusterDir is the cluster-manager config dir (node.crt/node.key +
 	// trusted/). Threaded to every worker that does cluster-scoped inter-node
@@ -378,6 +380,7 @@ func NewBroker(codec *Codec, paths workerPaths) *Broker {
 		settingsPath:       paths.settings,
 		clusterMgrPath:     paths.clusterMgr,
 		schedulerPath:      paths.scheduler,
+		codexWorker:        paths.codexWorker,
 		codexWorkerPort:    paths.codexWorkerPort,
 		clusterDir:         paths.clusterDir,
 		store:              newDiscoveryStore(),

@@ -838,6 +838,7 @@ class ModularSupervisor {
         // streams, and fans its schedule:priority out to the proxies via
         // node/set-priority (all broker-internal).
         passPath('--scheduler-path', 'job-scheduler')
+        passPath('--codex-worker-path', 'codex-worker')
         return [...args, ...this.logLevelArgs()]
     }
 

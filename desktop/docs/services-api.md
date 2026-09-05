@@ -18,6 +18,11 @@
 ### Requests the backend handles but the bridge never calls (unused capability)
 - ⚠️ lmstudio-proxy → node/selected
 - ⚠️ lmstudio-proxy → node/set-local-backend
+- ⚠️ nvpair-codex-supervisor → tools/call
+- ⚠️ nvpair-codex-supervisor → tools/list
+- ⚠️ nvpair-codex-worker → item/agentMessage/delta
+- ⚠️ nvpair-codex-worker → item/commandExecution/outputDelta
+- ⚠️ nvpair-codex-worker → turn/completed
 - ⚠️ nvpair-engine-manager → engine:describe
 - ⚠️ nvpair-engine-manager → engine:errors
 - ⚠️ nvpair-engine-manager → engine:logs
@@ -93,6 +98,22 @@
 
 **Dynamic / unresolved notify sites (verify by hand — `npm run service-contracts` prints the line numbers):**
 - `notifyMethod (var)  (httpserver.go, 2 sites)`
+
+## nvpair-codex-supervisor
+
+| Method | Direction | In bridge? |
+|---|---|---|
+| `tools/call` | request (we call) | ⚠️ not called |
+| `tools/list` | request (we call) | ⚠️ not called |
+
+## nvpair-codex-worker
+
+| Method | Direction | In bridge? |
+|---|---|---|
+| `error` | request (we call) | ✅ yes |
+| `item/agentMessage/delta` | request (we call) | ⚠️ not called |
+| `item/commandExecution/outputDelta` | request (we call) | ⚠️ not called |
+| `turn/completed` | request (we call) | ⚠️ not called |
 
 ## nvpair-engine-manager
 

@@ -16,6 +16,7 @@ export type ModularProcessName =
     | 'cluster-manager'
     | 'errors'
     | 'job-scheduler'
+    | 'codex-worker'
 
 export type ModularPackageArch = 'x64' | 'arm64'
 
@@ -155,6 +156,16 @@ export const MODULAR_RUNTIME_BINARIES: ModularRuntimeBinary[] = [
         needsFirewallAccess: false,
         optional: true
     },
+    {
+        // The broker owns the optional local Codex Worker lifecycle. Electron
+        // passes the path, but never starts this binary directly.
+        processName: 'codex-worker',
+        baseName: 'nvpair-codex-worker',
+        args: [],
+        launchOwner: 'broker',
+        needsFirewallAccess: false,
+        optional: true
+    },
     // Electron-direct: only the broker. Electron's ModularSupervisor spawns it
     // over stdio JSON-RPC, and it is then the parent of every worker above.
     {
@@ -171,7 +182,10 @@ export const MODULAR_RUNTIME_BINARIES: ModularRuntimeBinary[] = [
  * `nvpair-tui` is a headless terminal client that spawns its own `nvpair-ui-broker` —
  * see `services/nvpair-tui/README.md`.
  */
-export const MODULAR_BUNDLED_BINARIES: { baseName: string }[] = [{ baseName: 'nvpair-tui' }]
+export const MODULAR_BUNDLED_BINARIES: { baseName: string }[] = [
+    { baseName: 'nvpair-tui' },
+    { baseName: 'nvpair-codex-supervisor' }
+]
 
 /** Every backend binary shipped in the installer (runtime workers + bundled tools). */
 export function modularShippedBinaryBaseNames(): string[] {

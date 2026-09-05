@@ -49,33 +49,33 @@
 - Produces the process name `'codex-worker'` for broker-owned optional runtime startup and the bundled base name `nvpair-codex-supervisor` for Main Codex registration.
 - `brokerStartupArgs()` passes `--codex-worker-path <absolute path>` only when the packaged Worker exists; it never starts the Supervisor.
 
-- [ ] **Step 1: Write the failing inventory test.**
+- [x] **Step 1: Write the failing inventory test.**
 
   Add Vitest assertions that `modularShippedBinaryBaseNames()` contains
   `nvpair-codex-worker` and `nvpair-codex-supervisor`, that only
   `codex-worker` is in `MODULAR_RUNTIME_BINARIES`, and that the Worker launch
   owner is `broker` with `optional: true` while the Supervisor is bundled-only.
 
-- [ ] **Step 2: Run the focused test and verify the expected failure.**
+- [x] **Step 2: Run the focused test and verify the expected failure.**
 
   Run `npm exec vitest run tests/modular/codex-binary-inventory.test.ts` from
   `desktop/`. It must fail because neither Codex binary is currently in the
   inventory.
 
-- [ ] **Step 3: Add the inventory entries and broker path flag.**
+- [x] **Step 3: Add the inventory entries and broker path flag.**
 
   Extend `ModularProcessName`, append the optional broker-owned Worker entry,
   append the Supervisor to `MODULAR_BUNDLED_BINARIES`, and add one
   `passPath('--codex-worker-path', 'codex-worker')` call in
   `brokerStartupArgs()`. Do not add a Supervisor `passPath` call.
 
-- [ ] **Step 4: Run the focused tests and packaging contract checks.**
+- [x] **Step 4: Run the focused tests and packaging contract checks.**
 
   Run `npm exec vitest run tests/modular/codex-binary-inventory.test.ts`,
   `npm run typecheck`, and `npm run service-contracts:check` from `desktop/`.
   The test and both checks must exit 0.
 
-- [ ] **Step 5: Commit the packaging slice.**
+- [x] **Step 5: Commit the packaging slice.**
 
   Commit with `feat: package Codex desktop binaries`.
 
