@@ -144,8 +144,8 @@
 **Files:**
 - Create: `services/nvpair-codex-supervisor/runtime.go`
 - Create: `services/nvpair-codex-supervisor/runtime_test.go`
-- Create: `services/nvpair-codex-supervisor/index.go`
-- Create: `services/nvpair-codex-supervisor/index_test.go`
+- Create: `services/nvpair-codex-supervisor/taskindex.go`
+- Create: `services/nvpair-codex-supervisor/taskindex_test.go`
 - Modify: `services/nvpair-codex-supervisor/main.go`
 - Modify: `services/nvpair-codex-supervisor/pool.go`
 - Modify: `services/nvpair-codex-supervisor/client.go`
@@ -153,34 +153,34 @@
 
 **Interfaces:**
 - `runtime.LoadLocalDescriptor(path, now)` returns a validated local Worker target or a typed waiting state; stale generations and expired descriptors are rejected.
-- `TaskIndex.BeginDispatch`, `MarkAcknowledged`, `MarkUncertain`, `MarkTerminal`, and `ListMetadata` persist destination, owner, attempt, lease epoch, idempotency key, and cleanup state before dispatch.
+- `TaskIndex.Begin`, `MarkAcknowledged`, `MarkUncertain`, `MarkTerminal`, and `SnapshotMetadata` persist destination, owner, attempt, lease epoch, idempotency key, and cleanup state before dispatch.
 - A Supervisor starts and stays alive with an empty pool, reloads descriptor generations, and never reassigns an uncertain dispatch.
 
-- [ ] **Step 1: Write failing runtime/index tests.**
+- [x] **Step 1: Write failing runtime/index tests.**
 
   Cover descriptor expiry, boot-epoch replacement, credential-generation
   mismatch, empty-pool startup, durable pre-dispatch intent, lost ACK, restart
   recovery, owner-bound reads/cancel/follow-up, and metadata-only pagination.
 
-- [ ] **Step 2: Run the focused supervisor tests and verify the expected failures.**
+- [x] **Step 2: Run the focused supervisor tests and verify the expected failures.**
 
   Run `go test ./...` in `services/nvpair-codex-supervisor`; the new tests must
   fail because the runtime loader and durable index are absent.
 
-- [ ] **Step 3: Implement local descriptor loading and dynamic pool refresh.**
+- [x] **Step 3: Implement local descriptor loading and dynamic pool refresh.**
 
   Add a local authenticated target without LAN advertisement, keep remote mTLS
   discovery separate, and make refresh/revocation/failed-probe/duplicate
   identity decisions explicit. A first empty snapshot must not terminate MCP.
 
-- [ ] **Step 4: Implement the durable task index and metadata management API.**
+- [x] **Step 4: Implement the durable task index and metadata management API.**
 
   Persist complete intent before the first HTTP request, record uncertain ACK
   instead of creating a second task, enforce the authenticated owner on every
   task operation, and expose only bounded metadata through the private
   management protocol.
 
-- [ ] **Step 5: Run Go tests, race tests for the index, and commit.**
+- [x] **Step 5: Run Go tests, race tests for the index, and commit.**
 
   Run `go test ./...` and `go test -race ./...` in the Supervisor module, then
   commit with `feat: make Supervisor recovery and local discovery durable`.
@@ -206,7 +206,7 @@
 - `CodexManager.getState()`, `configureWorker(input)`, `setWorkerEnabled(enabled)`, `getMcpRegistration()`, `applyMcpRegistration()`, `removeMcpRegistration()`, `listTasks(page)`, and `cancelTask(ref)` are the only privileged operations exposed to preload.
 - MCP registration reports `registered`, `waiting_for_main`, `connected`, or `failed`; file write is never equivalent to live MCP availability.
 
-- [ ] **Step 1: Write failing config/registration/IPC tests.**
+- [x] **Step 1: Write failing config/registration/origin tests.**
 
   Cover atomic backup-preserving registration, unrelated-entry preservation,
   ambiguous replacement refusal, effective `CODEX_HOME` resolution,
@@ -214,12 +214,12 @@
   exact origin rejection, child-frame rejection, and unset-origin fail-closed
   behavior.
 
-- [ ] **Step 2: Run the focused tests and verify red.**
+- [x] **Step 2: Run the focused config/origin tests and verify red.**
 
   Run the three new Vitest files; they must fail because the Codex manager and
   hardened sender checks do not exist.
 
-- [ ] **Step 3: Implement main-process config and registration.**
+- [x] **Step 3: Implement main-process config and registration.**
 
   Use atomic temp-file replacement with mode `0600` where supported, retain one
   timestamped backup, fingerprint before write, and reject concurrent edits.
@@ -227,14 +227,14 @@
   the resolved Main config scope. Detect actual Main activation only through
   the Supervisor management state.
 
-- [ ] **Step 4: Harden `safeHandle` and add typed preload methods.**
+- [x] **Step 4: Harden `safeHandle` and add typed preload methods.**
 
   Require the exact configured renderer origin, `event.senderFrame ===
   event.sender.mainFrame`, and a validated channel payload before dispatching.
   Do not treat an empty `ELECTRON_RENDERER_URL` as a wildcard and do not allow
   arbitrary `file://` origins for privileged Codex calls.
 
-- [ ] **Step 5: Run desktop unit tests and typecheck, then commit.**
+- [x] **Step 5: Run desktop unit tests and typecheck, then commit.**
 
   Run `npm run test:unit -- --run` and `npm run typecheck` in `desktop/`, then
   commit with `feat: add typed Codex desktop control plane`.

@@ -16,16 +16,19 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"time"
 
 	"nvpair-shared/codexprotocol"
 	"nvpair-shared/jsonrpc"
 )
 
 type MCPServer struct {
-	client WorkerClient
-	pool   *WorkerPool
-	mu     sync.Mutex
-	owners map[string]WorkerClient
+	client           WorkerClient
+	pool             *WorkerPool
+	mu               sync.Mutex
+	owners           map[string]WorkerClient
+	localRuntimePath string
+	index            *TaskIndex
 }
 
 func NewMCPServer(client WorkerClient) *MCPServer {
@@ -37,12 +40,33 @@ func NewMCPServerWithWorkers(targets []WorkerTarget) *MCPServer {
 	return &MCPServer{pool: pool, owners: make(map[string]WorkerClient)}
 }
 
+func (s *MCPServer) SetLocalRuntimeDescriptor(path string) {
+	s.mu.Lock()
+	s.localRuntimePath = path
+	s.mu.Unlock()
+}
+
+func (s *MCPServer) SetTaskIndex(index *TaskIndex) {
+	s.mu.Lock()
+	s.index = index
+	s.mu.Unlock()
+}
+
 type mcpReadWriter struct {
 	io.Reader
 	io.Writer
 }
 
 func (s *MCPServer) Serve(input io.Reader, output io.Writer) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.mu.Lock()
+	localRuntimePath := s.localRuntimePath
+	s.mu.Unlock()
+	if localRuntimePath != "" {
+		s.refreshLocalRuntime(localRuntimePath, time.Now().UTC())
+		go s.watchLocalRuntime(ctx, localRuntimePath)
+	}
 	codec := jsonrpc.NewCodec(&mcpReadWriter{Reader: input, Writer: output})
 	for {
 		message, err := codec.Read()
@@ -58,7 +82,7 @@ func (s *MCPServer) Serve(input io.Reader, output io.Writer) error {
 		if !message.IsRequest() {
 			continue
 		}
-		result, rpcCode, rpcMessage := s.handle(context.Background(), message.Method, message.Params)
+		result, rpcCode, rpcMessage := s.handle(ctx, message.Method, message.Params)
 		if rpcCode != 0 {
 			if err := codec.RespondError(message.ID, rpcCode, rpcMessage); err != nil {
 				return err
@@ -69,6 +93,28 @@ func (s *MCPServer) Serve(input io.Reader, output io.Writer) error {
 			return err
 		}
 	}
+}
+
+func (s *MCPServer) watchLocalRuntime(ctx context.Context, path string) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			s.refreshLocalRuntime(path, now.UTC())
+		}
+	}
+}
+
+func (s *MCPServer) refreshLocalRuntime(path string, now time.Time) {
+	target, err := loadLocalRuntimeTarget(path, now)
+	if err != nil || target == nil {
+		s.pool.SetLocalTarget(nil)
+		return
+	}
+	s.pool.SetLocalTarget(target)
 }
 
 func (s *MCPServer) handle(ctx context.Context, method string, params json.RawMessage) (any, int, string) {
@@ -243,20 +289,43 @@ func (s *MCPServer) delegate(ctx context.Context, raw json.RawMessage) (any, int
 	if err != nil {
 		return toolError(err.Error()), 0, ""
 	}
-	result, code, message := s.callWorker(ctx, "tasks.delegate", "", func() (json.RawMessage, error) { return target.Client.Create(ctx, request) })
-	if code == 0 {
-		if rawResult, ok := result.(toolResult); ok && len(rawResult.StructuredContent) > 0 {
-			var response struct {
-				Record codexprotocol.TaskRecord `json:"record"`
-			}
-			if json.Unmarshal(rawResult.StructuredContent, &response) == nil && response.Record.TaskID != "" {
-				s.mu.Lock()
-				s.owners[response.Record.TaskID] = target.Client
-				s.mu.Unlock()
-			}
+	s.mu.Lock()
+	index := s.index
+	s.mu.Unlock()
+	if index != nil {
+		if err := index.Begin(TaskIntent{TaskID: taskID, RequestID: requestID, AttemptID: attemptID, LeaseEpoch: 1, WorkerID: target.ID, Request: request}); err != nil {
+			return toolError("could not persist dispatch intent: " + err.Error()), 0, ""
 		}
 	}
-	return result, code, message
+	rawResult, err := target.Client.Create(ctx, request)
+	if err != nil {
+		if index != nil {
+			_ = index.MarkUncertain(taskID, err.Error())
+		}
+		return toolError("dispatch outcome is uncertain; retry status for the same task: " + err.Error()), 0, ""
+	}
+	sanitized, err := sanitizeWorkerResponse("tasks.delegate", rawResult, taskID)
+	if err != nil {
+		if index != nil {
+			_ = index.MarkUncertain(taskID, "Worker returned an invalid dispatch response")
+		}
+		return toolError("dispatch outcome is uncertain; Worker response was invalid"), 0, ""
+	}
+	if index != nil {
+		if err := index.MarkAcknowledged(taskID, target.ID); err != nil {
+			_ = index.MarkUncertain(taskID, "could not persist acknowledged dispatch")
+			return toolError("dispatch outcome is uncertain; acknowledgement could not be persisted"), 0, ""
+		}
+	}
+	var response struct {
+		Record codexprotocol.TaskRecord `json:"record"`
+	}
+	if json.Unmarshal(sanitized, &response) == nil && response.Record.TaskID != "" {
+		s.mu.Lock()
+		s.owners[response.Record.TaskID] = target.Client
+		s.mu.Unlock()
+	}
+	return toolSuccess(sanitized), 0, ""
 }
 
 func (s *MCPServer) workersList(ctx context.Context) (any, int, string) {
@@ -298,9 +367,22 @@ func mustArtifactJSON(taskID, artifactID string, data []byte) json.RawMessage {
 func (s *MCPServer) taskClients(taskID string) []WorkerClient {
 	s.mu.Lock()
 	owner := s.owners[taskID]
+	index := s.index
 	s.mu.Unlock()
 	if owner != nil {
 		return []WorkerClient{owner}
+	}
+	if index != nil {
+		intent, ok := index.Get(taskID)
+		if !ok {
+			return nil
+		}
+		for _, target := range s.pool.Snapshot() {
+			if target.ID == intent.WorkerID {
+				return []WorkerClient{target.Client}
+			}
+		}
+		return nil
 	}
 	clients := make([]WorkerClient, 0)
 	for _, target := range s.pool.Snapshot() {
@@ -317,12 +399,41 @@ func (s *MCPServer) taskCall(ctx context.Context, toolName, taskID string, call 
 			lastErr = err
 			continue
 		}
-		return s.callWorker(ctx, toolName, taskID, func() (json.RawMessage, error) { return result, nil })
+		projected, code, message := s.callWorker(ctx, toolName, taskID, func() (json.RawMessage, error) { return result, nil })
+		if code == 0 && taskID != "" {
+			s.markTerminalFromResult(taskID, projected)
+		}
+		return projected, code, message
 	}
 	if lastErr == nil {
 		lastErr = errors.New("task owner is unavailable")
 	}
 	return toolError(lastErr.Error()), 0, ""
+}
+
+func (s *MCPServer) markTerminalFromResult(taskID string, projected any) {
+	tool, ok := projected.(toolResult)
+	if !ok || len(tool.StructuredContent) == 0 {
+		return
+	}
+	var record codexprotocol.TaskRecord
+	if err := json.Unmarshal(tool.StructuredContent, &record); err != nil {
+		var envelope struct {
+			Record codexprotocol.TaskRecord `json:"record"`
+		}
+		if json.Unmarshal(tool.StructuredContent, &envelope) == nil {
+			record = envelope.Record
+		}
+	}
+	if !record.State.Terminal() {
+		return
+	}
+	s.mu.Lock()
+	index := s.index
+	s.mu.Unlock()
+	if index != nil {
+		_ = index.MarkTerminal(taskID)
+	}
 }
 
 func (s *MCPServer) callWorker(ctx context.Context, toolName, expectedTaskID string, call func() (json.RawMessage, error)) (any, int, string) {

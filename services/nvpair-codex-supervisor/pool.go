@@ -126,6 +126,25 @@ func (p *WorkerPool) Snapshot() []WorkerTarget {
 	return append([]WorkerTarget(nil), p.targets...)
 }
 
+// SetLocalTarget atomically replaces the broker-owned local Worker entry while
+// preserving discovered remote Workers. A nil target means the local runtime
+// is unavailable or its descriptor is invalid.
+func (p *WorkerPool) SetLocalTarget(target *WorkerTarget) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	filtered := p.targets[:0]
+	for _, current := range p.targets {
+		if current.ID != "local" {
+			filtered = append(filtered, current)
+		}
+	}
+	p.targets = filtered
+	if target != nil {
+		p.targets = append(p.targets, *target)
+	}
+	sort.Slice(p.targets, func(i, j int) bool { return p.targets[i].ID < p.targets[j].ID })
+}
+
 func targetEligible(target WorkerTarget, req WorkerRequirements) bool {
 	if target.LastError != "" {
 		return false

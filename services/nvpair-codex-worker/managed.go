@@ -23,7 +23,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -32,6 +34,11 @@ import (
 )
 
 const managedWorkerConfigSchemaVersion = 1
+
+var (
+	managedDescriptorTTL             = 15 * time.Second
+	managedDescriptorRefreshInterval = 5 * time.Second
+)
 
 type managedWorkerConfig struct {
 	SchemaVersion         int      `json:"schemaVersion"`
@@ -113,13 +120,15 @@ func readManagedConfig(path string) (managedWorkerConfig, error) {
 }
 
 type managedWorkerController struct {
-	mu         sync.Mutex
-	config     managedWorkerConfig
-	worker     *workerHTTPServer
-	store      *TaskStore
-	httpServer *http.Server
-	descriptor codexruntime.RuntimeDescriptor
-	closed     bool
+	mu            sync.Mutex
+	config        managedWorkerConfig
+	worker        *workerHTTPServer
+	store         *TaskStore
+	httpServer    *http.Server
+	descriptor    codexruntime.RuntimeDescriptor
+	heartbeatStop chan struct{}
+	heartbeatDone chan struct{}
+	closed        bool
 }
 
 func runManagedControl(input io.Reader, output io.Writer) error {
@@ -247,6 +256,11 @@ func startManagedWorker(config managedWorkerConfig) (*managedWorkerController, e
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
+	codexBin, err := resolveCodexExecutable(config.CodexBin)
+	if err != nil {
+		return nil, err
+	}
+	config.CodexBin = codexBin
 	if err := os.MkdirAll(config.WorkspaceRoot, 0o700); err != nil {
 		return nil, fmt.Errorf("create Worker workspace: %w", err)
 	}
@@ -287,7 +301,7 @@ func startManagedWorker(config managedWorkerConfig) (*managedWorkerController, e
 		_ = store.Close()
 		return nil, fmt.Errorf("listen local Worker: %w", err)
 	}
-	if err := writeManagedCredential(config.CredentialRef, config.AuthToken, fingerprint); err != nil {
+	if err := writeManagedCredential(config.CredentialRef, config.AuthToken, fingerprint, config.CredentialGeneration); err != nil {
 		_ = listener.Close()
 		_ = store.Close()
 		return nil, err
@@ -306,7 +320,7 @@ func startManagedWorker(config managedWorkerConfig) (*managedWorkerController, e
 			BootEpoch:               max(config.BootEpoch, uint64(time.Now().UnixNano())),
 			Generation:              config.Generation,
 			WrittenAt:               time.Now().UTC(),
-			ExpiresAt:               time.Now().UTC().Add(15 * time.Second),
+			ExpiresAt:               time.Now().UTC().Add(managedDescriptorTTL),
 			Endpoint:                "https://" + listener.Addr().String(),
 			Transport:               codexruntime.TransportPinnedLocalTLS,
 			ServerCertificateSHA256: fingerprint,
@@ -321,12 +335,50 @@ func startManagedWorker(config managedWorkerConfig) (*managedWorkerController, e
 		_ = store.Close()
 		return nil, fmt.Errorf("publish runtime descriptor: %w", err)
 	}
+	controller.heartbeatStop = make(chan struct{})
+	controller.heartbeatDone = make(chan struct{})
+	go controller.runHeartbeat()
 	go func() {
 		if err := httpServer.Serve(tlsListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			// The control loop reports the lifecycle; Serve errors are not task data.
 		}
 	}()
 	return controller, nil
+}
+
+func resolveCodexExecutable(value string) (string, error) {
+	if filepath.IsAbs(value) {
+		info, err := os.Stat(value)
+		if err != nil {
+			return "", fmt.Errorf("Codex executable is unavailable: %w", err)
+		}
+		if info.IsDir() {
+			return "", errors.New("Codex executable path is a directory")
+		}
+		if info.Mode().Perm()&0o111 == 0 && runtime.GOOS != "windows" {
+			return "", errors.New("Codex executable is not executable")
+		}
+		return value, nil
+	}
+	resolved, err := exec.LookPath(value)
+	if err != nil {
+		return "", fmt.Errorf("find Codex executable %q: %w", value, err)
+	}
+	return resolved, nil
+}
+
+func (c *managedWorkerController) runHeartbeat() {
+	ticker := time.NewTicker(managedDescriptorRefreshInterval)
+	defer ticker.Stop()
+	defer close(c.heartbeatDone)
+	for {
+		select {
+		case <-c.heartbeatStop:
+			return
+		case <-ticker.C:
+			_ = c.Refresh()
+		}
+	}
 }
 
 func (c *managedWorkerController) descriptorCopy() *codexruntime.RuntimeDescriptor {
@@ -344,7 +396,7 @@ func (c *managedWorkerController) Refresh() error {
 	}
 	c.descriptor.Generation++
 	c.descriptor.WrittenAt = time.Now().UTC()
-	c.descriptor.ExpiresAt = c.descriptor.WrittenAt.Add(15 * time.Second)
+	c.descriptor.ExpiresAt = c.descriptor.WrittenAt.Add(managedDescriptorTTL)
 	return codexruntime.WriteDescriptor(c.config.RuntimeDescriptorPath, c.descriptor)
 }
 
@@ -359,7 +411,15 @@ func (c *managedWorkerController) Stop() error {
 	worker := c.worker
 	store := c.store
 	descriptorPath := c.config.RuntimeDescriptorPath
+	heartbeatStop := c.heartbeatStop
+	heartbeatDone := c.heartbeatDone
+	if heartbeatStop != nil {
+		close(heartbeatStop)
+	}
 	c.mu.Unlock()
+	if heartbeatDone != nil {
+		<-heartbeatDone
+	}
 	worker.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	err := server.Shutdown(ctx)
@@ -373,14 +433,15 @@ func (c *managedWorkerController) Stop() error {
 	return err
 }
 
-func writeManagedCredential(path, token, fingerprint string) error {
+func writeManagedCredential(path, token, fingerprint string, generation uint64) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("create credential directory: %w", err)
 	}
 	data, err := json.Marshal(struct {
 		BearerToken             string `json:"bearerToken"`
 		ServerCertificateSHA256 string `json:"serverCertificateSha256"`
-	}{BearerToken: token, ServerCertificateSHA256: fingerprint})
+		CredentialGeneration    uint64 `json:"credentialGeneration"`
+	}{BearerToken: token, ServerCertificateSHA256: fingerprint, CredentialGeneration: generation})
 	if err != nil {
 		return fmt.Errorf("marshal Worker credential: %w", err)
 	}

@@ -6,6 +6,13 @@ import type { ModularLogLevel } from '@/shared/constants/modular-runtime'
 import type { ServiceBridgeInvokeRequest } from './service-bridge'
 import type { UpdateStatus } from '@/shared/types/update'
 import type { DemoState } from '@/shared/types/inference-demo'
+import type {
+    CodexDesktopState,
+    CodexRegistrationSnapshot,
+    CodexTaskMetadata,
+    CodexTaskReference,
+    CodexWorkerConfigInput
+} from '@/shared/types/codex'
 
 /**
  * IPC contract types for Electron-native operations only.
@@ -131,6 +138,16 @@ export interface IpcChannelMap {
         request: ServiceBridgeInvokeRequest
         response: WsInvokeResponse<ServiceBridgeInvokeRequest['channel']>
     }
+
+    // -- Codex Desktop integration --
+    'codex:get-state': { request: void; response: CodexDesktopState }
+    'codex:configure-worker': { request: CodexWorkerConfigInput; response: CodexDesktopState }
+    'codex:set-worker-enabled': { request: { enabled: boolean }; response: CodexDesktopState }
+    'codex:get-mcp-registration': { request: void; response: CodexRegistrationSnapshot }
+    'codex:apply-mcp-registration': { request: void; response: CodexRegistrationSnapshot }
+    'codex:remove-mcp-registration': { request: void; response: CodexRegistrationSnapshot },
+    'codex:list-tasks': { request: void; response: CodexTaskMetadata[] }
+    'codex:cancel-task': { request: CodexTaskReference; response: void }
 }
 
 /**

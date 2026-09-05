@@ -75,3 +75,27 @@ func TestWorkerPoolDoesNotSelectRefreshFailure(t *testing.T) {
 		t.Fatal("offline Worker remained eligible after refresh failure")
 	}
 }
+
+func TestWorkerPoolReplacesAndRemovesLocalTarget(t *testing.T) {
+	remote := WorkerTarget{ID: "remote", Client: fakeWorkerClient{}}
+	pool := NewWorkerPool([]WorkerTarget{remote})
+	localOne := WorkerTarget{ID: "local", Client: fakeWorkerClient{}}
+	pool.SetLocalTarget(&localOne)
+	if got := len(pool.Snapshot()); got != 2 {
+		t.Fatalf("pool size after local add=%d, want 2", got)
+	}
+	localTwo := WorkerTarget{ID: "local", Client: unavailableWorkerClient{}}
+	pool.SetLocalTarget(&localTwo)
+	snapshot := pool.Snapshot()
+	if len(snapshot) != 2 || snapshot[0].ID != "local" || snapshot[1].ID != "remote" {
+		t.Fatalf("snapshot after local replacement=%#v", snapshot)
+	}
+	if snapshot[0].Client == nil {
+		t.Fatal("replacement removed local client")
+	}
+	pool.SetLocalTarget(nil)
+	snapshot = pool.Snapshot()
+	if len(snapshot) != 1 || snapshot[0].ID != "remote" {
+		t.Fatalf("snapshot after local removal=%#v", snapshot)
+	}
+}

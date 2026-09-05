@@ -48,6 +48,7 @@ import type { ServiceError, ServiceErrorSeverity } from '@/shared/types/errors'
 import type { ClusterNode } from '@/shared/types/cluster'
 import type { EngineType } from '@/shared/types/engines'
 import { APP_DISPLAY_NAME } from '@/shared/constants/app'
+import { codexConfigPath, codexWorkerConfigPath, loadCodexConfig } from '@/electron/codex/config-store'
 
 const log = createStructuredLogger('service-bridge')
 const ENGINE_PREPARE_SHUTDOWN_METHOD = 'engine:prepare-shutdown'
@@ -839,6 +840,18 @@ class ModularSupervisor {
         // node/set-priority (all broker-internal).
         passPath('--scheduler-path', 'job-scheduler')
         passPath('--codex-worker-path', 'codex-worker')
+        try {
+            const userDataRoot = app.getPath('userData')
+            const config = loadCodexConfig(codexConfigPath(userDataRoot))
+            if (config.enabled && fs.existsSync(codexWorkerConfigPath(userDataRoot))) {
+                args.push('--codex-worker-config', codexWorkerConfigPath(userDataRoot))
+            }
+        } catch (error) {
+            log.warn({
+                sublevel: 'codex-worker',
+                message: `Codex Worker configuration is invalid; local Worker disabled: ${getErrorString(error)}`
+            })
+        }
         return [...args, ...this.logLevelArgs()]
     }
 

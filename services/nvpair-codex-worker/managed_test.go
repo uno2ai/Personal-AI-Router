@@ -61,6 +61,15 @@ func TestManagedWorkerConfigValidateRejectsUnsafeOrIncompleteValues(t *testing.T
 	}
 }
 
+func TestManagedWorkerDoesNotReportReadyForMissingCodexExecutable(t *testing.T) {
+	root := t.TempDir()
+	config := validManagedConfig(root)
+	config.CodexBin = filepath.Join(root, "missing-codex")
+	if _, err := startManagedWorker(config); err == nil {
+		t.Fatal("managed Worker reported ready without a usable Codex executable")
+	}
+}
+
 func TestReadManagedConfigUsesStrictJSON(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "config.json")
@@ -189,6 +198,38 @@ func TestManagedControlStartsReportsAndStopsWorker(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("managed control loop did not stop")
 	}
+}
+
+func TestManagedWorkerHeartbeatRefreshesRuntimeDescriptor(t *testing.T) {
+	oldTTL := managedDescriptorTTL
+	oldInterval := managedDescriptorRefreshInterval
+	managedDescriptorTTL = 40 * time.Millisecond
+	managedDescriptorRefreshInterval = 10 * time.Millisecond
+	defer func() {
+		managedDescriptorTTL = oldTTL
+		managedDescriptorRefreshInterval = oldInterval
+	}()
+
+	root := t.TempDir()
+	config := validManagedConfig(root)
+	controller, err := startManagedWorker(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controller.Stop()
+	first, err := codexruntime.ReadDescriptor(config.RuntimeDescriptorPath, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(250 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		current, readErr := codexruntime.ReadDescriptor(config.RuntimeDescriptorPath, time.Now().UTC())
+		if readErr == nil && current.Generation > first.Generation {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("managed Worker heartbeat did not refresh the runtime descriptor")
 }
 
 type controlEventWriter chan<- []byte

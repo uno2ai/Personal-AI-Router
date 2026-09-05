@@ -7,8 +7,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -20,12 +22,19 @@ type fakeWorkerClient struct{}
 
 type leakyWorkerClient struct{}
 
+type uncertainWorkerClient struct{}
+
 func (fakeWorkerClient) Worker(context.Context) (json.RawMessage, error) {
 	return json.RawMessage(`{"protocolVersion":1,"version":"test"}`), nil
 }
 
-func (fakeWorkerClient) Create(context.Context, codexprotocol.TaskRequest) (json.RawMessage, error) {
-	return json.RawMessage(`{"record":{"taskId":"task-1","attemptId":"attempt-1","leaseEpoch":1,"state":"accepted"},"idempotent":false}`), nil
+func (fakeWorkerClient) Create(_ context.Context, request codexprotocol.TaskRequest) (json.RawMessage, error) {
+	record := codexprotocol.TaskRecord{Mutation: request.Mutation, State: codexprotocol.StateAccepted, Workspace: request.Workspace, Execution: request.Execution}
+	data, err := json.Marshal(map[string]any{"record": record, "idempotent": false})
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
 }
 
 func (fakeWorkerClient) Status(context.Context, string) (json.RawMessage, error) {
@@ -62,6 +71,25 @@ func (leakyWorkerClient) Cancel(context.Context, codexprotocol.Mutation) (json.R
 
 func (leakyWorkerClient) Artifact(context.Context, string, string) ([]byte, error) {
 	return []byte("secret"), nil
+}
+
+func (uncertainWorkerClient) Worker(context.Context) (json.RawMessage, error) {
+	return fakeWorkerClient{}.Worker(context.Background())
+}
+func (uncertainWorkerClient) Create(context.Context, codexprotocol.TaskRequest) (json.RawMessage, error) {
+	return nil, errors.New("connection lost after Worker accepted the request")
+}
+func (uncertainWorkerClient) Status(context.Context, string) (json.RawMessage, error) {
+	return fakeWorkerClient{}.Status(context.Background(), "task-1")
+}
+func (uncertainWorkerClient) Result(context.Context, string) (json.RawMessage, error) {
+	return fakeWorkerClient{}.Result(context.Background(), "task-1")
+}
+func (uncertainWorkerClient) Cancel(context.Context, codexprotocol.Mutation) (json.RawMessage, error) {
+	return fakeWorkerClient{}.Cancel(context.Background(), codexprotocol.Mutation{})
+}
+func (uncertainWorkerClient) Artifact(context.Context, string, string) ([]byte, error) {
+	return nil, errors.New("unavailable")
 }
 
 func callMCP(t *testing.T, server *MCPServer, request string) json.RawMessage {
@@ -135,6 +163,28 @@ func TestDelegateReturnsWorkerHandoffWithoutTranscript(t *testing.T) {
 	}
 	if !strings.Contains(text, "taskId") || !strings.Contains(text, "state") {
 		t.Fatalf("missing compact task response: %s", text)
+	}
+}
+
+func TestDelegatePersistsUncertainOutcomeWithoutReassignment(t *testing.T) {
+	index, err := OpenTaskIndex(filepath.Join(t.TempDir(), "dispatch.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer index.Close()
+	server := NewMCPServerWithWorkers([]WorkerTarget{{ID: "local", Client: uncertainWorkerClient{}}})
+	server.SetTaskIndex(index)
+	result := callMCP(t, server, `{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"tasks.delegate","arguments":{"objective":"run tests","workspace":"local","mode":"read"}}}`)
+	var decoded toolResult
+	if err := json.Unmarshal(result, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if !decoded.IsError || !strings.Contains(responseText(t, result), "uncertain") {
+		t.Fatalf("dispatch result=%s, want uncertain error", responseText(t, result))
+	}
+	intents := index.Snapshot()
+	if len(intents) != 1 || intents[0].State != DispatchUncertain {
+		t.Fatalf("dispatch intents=%#v, want one uncertain intent", intents)
 	}
 }
 

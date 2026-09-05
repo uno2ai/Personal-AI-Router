@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { BrowserWindow, ipcMain, IpcMainInvokeEvent } from 'electron'
+import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 import type {
     IpcResult,
     IpcChannelKey,
@@ -10,14 +12,42 @@ import type {
 } from '@/shared/types/ipc-channels'
 import getErrorString from '@/shared/utils/get-error-string'
 
+export function isAllowedRendererNavigation(
+    url: string,
+    configuredRendererUrl: string,
+    packagedRendererFile: string,
+    isMainFrame: boolean
+): boolean {
+    if (!isMainFrame) return false
+    if (configuredRendererUrl) {
+        try {
+            return new URL(url).origin === new URL(configuredRendererUrl).origin
+        } catch {
+            return false
+        }
+    }
+    if (!packagedRendererFile) return false
+    try {
+        const actual = new URL(url)
+        const expected = new URL(packagedRendererFile)
+        return actual.protocol === 'file:' && expected.protocol === 'file:' && actual.pathname === expected.pathname
+    } catch {
+        return false
+    }
+}
+
 function isKnownSender(event: IpcMainInvokeEvent): boolean {
     const senderWindow = BrowserWindow.fromWebContents(event.sender)
     if (!senderWindow) return false
 
     const url = event.sender.getURL()
-    if (url.startsWith('file://')) return true
-    if (url.startsWith(process.env.ELECTRON_RENDERER_URL ?? '')) return true
-    return false
+    const packagedRendererFile = pathToFileURL(path.join(__dirname, '../ui/index.html')).toString()
+    return isAllowedRendererNavigation(
+        url,
+        process.env['ELECTRON_RENDERER_URL'] ?? '',
+        packagedRendererFile,
+        event.senderFrame === event.sender.mainFrame
+    )
 }
 
 type Req<K extends IpcChannelKey> = IpcChannelMap[K]['request']

@@ -5,6 +5,10 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -35,6 +40,126 @@ type HTTPWorkerClient struct {
 	mesh      *clustertrust.Mesh
 	peerUUID  string
 	pool      *clustertrust.PeerClientPool
+}
+
+type localWorkerCredential struct {
+	BearerToken             string `json:"bearerToken"`
+	ServerCertificateSHA256 string `json:"serverCertificateSha256"`
+	CredentialGeneration    uint64 `json:"credentialGeneration"`
+}
+
+// NewPinnedLocalWorkerClient creates the same-user client for the broker-owned
+// local Worker. The Worker uses a self-signed certificate, so the certificate
+// chain is intentionally not trusted; the exact leaf DER is pinned instead.
+func NewPinnedLocalWorkerClient(rawURL, credentialPath, expectedCertificateSHA256 string, expectedCredentialGeneration uint64) (*HTTPWorkerClient, error) {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
+		return nil, errors.New("local Worker URL must be an absolute https URL")
+	}
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return nil, errors.New("local Worker URL must not contain credentials or query data")
+	}
+	ip := net.ParseIP(parsed.Hostname())
+	if ip == nil || !ip.IsLoopback() {
+		return nil, errors.New("local Worker URL must use a literal loopback address")
+	}
+	expected, err := decodeCertificateFingerprint(expectedCertificateSHA256)
+	if err != nil {
+		return nil, err
+	}
+	credential, err := readLocalWorkerCredential(credentialPath)
+	if err != nil {
+		return nil, err
+	}
+	credentialFingerprint, err := decodeCertificateFingerprint(credential.ServerCertificateSHA256)
+	if err != nil {
+		return nil, fmt.Errorf("local Worker credential certificate pin: %w", err)
+	}
+	if !strings.EqualFold(credential.ServerCertificateSHA256, expectedCertificateSHA256) || !equalBytes(credentialFingerprint, expected) {
+		return nil, errors.New("local Worker credential certificate pin does not match runtime descriptor")
+	}
+	if expectedCredentialGeneration == 0 || credential.CredentialGeneration != expectedCredentialGeneration {
+		return nil, errors.New("local Worker credential generation does not match runtime descriptor")
+	}
+	transport := &http.Transport{
+		Proxy: nil,
+		TLSClientConfig: &tls.Config{
+			MinVersion:         tls.VersionTLS13,
+			InsecureSkipVerify: true, // the leaf DER is verified below.
+			VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+				if len(rawCerts) == 0 {
+					return errors.New("local Worker did not present a certificate")
+				}
+				digest := sha256.Sum256(rawCerts[0])
+				if !equalBytes(digest[:], expected) {
+					return errors.New("local Worker certificate pin mismatch")
+				}
+				return nil
+			},
+		},
+	}
+	return &HTTPWorkerClient{
+		baseURL:   strings.TrimRight(parsed.String(), "/"),
+		authToken: credential.BearerToken,
+		http: &http.Client{
+			Timeout:   30 * time.Second,
+			Transport: transport,
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
+	}, nil
+}
+
+func readLocalWorkerCredential(path string) (localWorkerCredential, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return localWorkerCredential{}, fmt.Errorf("stat local Worker credential: %w", err)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return localWorkerCredential{}, errors.New("local Worker credential must not be group/world accessible")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return localWorkerCredential{}, fmt.Errorf("open local Worker credential: %w", err)
+	}
+	defer file.Close()
+	decoder := json.NewDecoder(io.LimitReader(file, 16<<10))
+	decoder.DisallowUnknownFields()
+	var credential localWorkerCredential
+	if err := decoder.Decode(&credential); err != nil {
+		return localWorkerCredential{}, fmt.Errorf("decode local Worker credential: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return localWorkerCredential{}, errors.New("local Worker credential contains trailing JSON")
+		}
+		return localWorkerCredential{}, fmt.Errorf("decode trailing local Worker credential: %w", err)
+	}
+	if strings.TrimSpace(credential.BearerToken) == "" || strings.TrimSpace(credential.ServerCertificateSHA256) == "" || credential.CredentialGeneration == 0 {
+		return localWorkerCredential{}, errors.New("local Worker credential is incomplete")
+	}
+	return credential, nil
+}
+
+func decodeCertificateFingerprint(value string) ([]byte, error) {
+	decoded, err := hex.DecodeString(strings.TrimSpace(value))
+	if err != nil || len(decoded) != sha256.Size {
+		return nil, errors.New("certificate pin must be a SHA-256 hex digest")
+	}
+	return decoded, nil
+}
+
+func equalBytes(left, right []byte) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	var difference byte
+	for i := range left {
+		difference |= left[i] ^ right[i]
+	}
+	return difference == 0
 }
 
 // NewMTLSWorkerClient creates a remote client for a Worker discovered through

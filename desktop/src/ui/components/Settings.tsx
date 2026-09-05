@@ -8,10 +8,12 @@ import { InviteApprovalModal } from './InviteApprovalModal'
 import { ResponsiveNavLayout, type ResponsiveNavItem } from './ResponsiveNavLayout'
 import { isSettingsWindowTab } from '@/ui/types/settings-window'
 import { useOverviewUiStore } from '@/ui/stores/overview-ui.store'
+import CodexSettings from './Codex/CodexSettings'
 
 const SETTINGS_NAV_ITEMS: ResponsiveNavItem[] = [
     { id: 'cluster', label: 'Cluster' },
-    { id: 'service', label: 'Service' }
+    { id: 'service', label: 'Service' },
+    { id: 'codex', label: 'Codex Pair' }
 ]
 
 export default function Settings() {
@@ -34,6 +36,7 @@ export default function Settings() {
                     <Stack className="grow overflow-y-auto w-full">
                         {activeTab === 'cluster' && <ClusterSettings />}
                         {activeTab === 'service' && <ServiceSettings />}
+                        {activeTab === 'codex' && <CodexSettings />}
                     </Stack>
                 </Stack>
             </ResponsiveNavLayout>
