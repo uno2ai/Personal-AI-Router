@@ -45,6 +45,7 @@ interface ManagedWorkerConfig {
     credentialGeneration: number
     policyRevision: number
     artifactMaxBytes: number
+    policyCeiling: CodexConfig['policyCeiling']
     workspaceAlias: string
     toolLabels: string[]
 }
@@ -216,6 +217,7 @@ export class CodexManager {
             credentialGeneration: config.policyRevision,
             policyRevision: config.policyRevision,
             artifactMaxBytes: 8 << 20,
+            policyCeiling: config.policyCeiling,
             workspaceAlias: 'local',
             toolLabels: []
         }

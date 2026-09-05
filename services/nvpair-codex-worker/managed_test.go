@@ -31,6 +31,7 @@ func validManagedConfig(root string) managedWorkerConfig {
 		CredentialGeneration:  1,
 		PolicyRevision:        1,
 		ArtifactMaxBytes:      8 << 20,
+		PolicyCeiling:         "read-only",
 		WorkspaceAlias:        "local",
 	}
 }
@@ -49,6 +50,7 @@ func TestManagedWorkerConfigValidateRejectsUnsafeOrIncompleteValues(t *testing.T
 		{name: "token", edit: func(c *managedWorkerConfig) { c.AuthToken = "" }},
 		{name: "capacity", edit: func(c *managedWorkerConfig) { c.MaxConcurrency = 0 }},
 		{name: "descriptor path", edit: func(c *managedWorkerConfig) { c.RuntimeDescriptorPath = "runtime.json" }},
+		{name: "policy ceiling", edit: func(c *managedWorkerConfig) { c.PolicyCeiling = "unrestricted" }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -83,12 +85,14 @@ func TestReadManagedConfigUsesStrictJSON(t *testing.T) {
 
 func TestManagedControlStartsReportsAndStopsWorker(t *testing.T) {
 	root := t.TempDir()
+	t.Setenv("CODEX_FAKE_APP_SERVER", "1")
 	workspace := filepath.Join(root, "workspace")
 	if err := os.MkdirAll(workspace, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	config := validManagedConfig(root)
 	config.WorkspaceRoot = workspace
+	config.CodexBin = mustExecutable(t)
 	configPath := filepath.Join(root, "config.json")
 	data, err := json.Marshal(config)
 	if err != nil {
@@ -211,7 +215,9 @@ func TestManagedWorkerHeartbeatRefreshesRuntimeDescriptor(t *testing.T) {
 	}()
 
 	root := t.TempDir()
+	t.Setenv("CODEX_FAKE_APP_SERVER", "1")
 	config := validManagedConfig(root)
+	config.CodexBin = mustExecutable(t)
 	controller, err := startManagedWorker(config)
 	if err != nil {
 		t.Fatal(err)

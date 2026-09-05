@@ -40,6 +40,79 @@ func NewAppServerFactory(binary string) AppServerFactory {
 	return AppServerFactory{binary: binary}
 }
 
+// Probe starts the configured native app-server long enough to negotiate the
+// initialize contract. This is deliberately separate from a task run: a
+// successful listener bind does not prove that the executable, account, or
+// app-server protocol is usable.
+func (f AppServerFactory) Probe(ctx context.Context, cwd string) error {
+	resolvedCWD, err := appServerCWD(cwd)
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(f.binary, "app-server", "--listen", "stdio://")
+	cleanupChild, verifyChild, err := prepareChildProcess(cmd, resolvedCWD)
+	if err != nil {
+		return fmt.Errorf("prepare app-server probe: %w", err)
+	}
+	cmd.Stderr = io.Discard
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		cleanupChild()
+		return fmt.Errorf("open app-server probe stdin: %w", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		_ = stdin.Close()
+		cleanupChild()
+		return fmt.Errorf("open app-server probe stdout: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		_ = stdin.Close()
+		cleanupChild()
+		return fmt.Errorf("start app-server probe: %w", err)
+	}
+	if err := verifyChild(); err != nil {
+		_ = terminateAndWait(cmd)
+		cleanupChild()
+		return fmt.Errorf("verify app-server probe working directory: %w", err)
+	}
+	cleanupChild()
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- cmd.Wait() }()
+	peer := jsonrpc.NewPeer(jsonrpc.NewCodec(&readWriter{Reader: stdout, Writer: stdin}))
+	serveDone := make(chan struct{})
+	go func() {
+		defer close(serveDone)
+		peer.Serve(nil, nil)
+	}()
+	cleanup := func(probeErr error) error {
+		session := &AppServerSession{}
+		if closeErr := session.closeProcess(cmd, stdin, peer, serveDone, waitCh); closeErr != nil {
+			if probeErr == nil {
+				return closeErr
+			}
+			return fmt.Errorf("%w (probe cleanup: %v)", probeErr, closeErr)
+		}
+		return probeErr
+	}
+	result, rpcErr, err := peer.Call(ctx, "initialize", mustJSON(map[string]any{
+		"clientInfo": map[string]string{"name": "nvpair-codex-worker-probe", "version": Version},
+	}))
+	if err != nil {
+		return cleanup(fmt.Errorf("app-server probe initialize: %w", err))
+	}
+	if rpcErr != nil {
+		return cleanup(fmt.Errorf("app-server probe initialize: %s", rpcErr.Message))
+	}
+	if err := validateAppServerInitialize(result); err != nil {
+		return cleanup(err)
+	}
+	if err := peer.Notify("initialized", map[string]any{}); err != nil {
+		return cleanup(fmt.Errorf("app-server probe initialized: %w", err))
+	}
+	return cleanup(nil)
+}
+
 func (f AppServerFactory) New() *AppServerSession {
 	return &AppServerSession{binary: f.binary}
 }

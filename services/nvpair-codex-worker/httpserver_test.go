@@ -141,6 +141,59 @@ func TestCreateTaskPersistsBeforeReturningAndIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestReadOnlyPolicyCeilingRejectsWriteTaskBeforeExecution(t *testing.T) {
+	root := t.TempDir()
+	policy, err := NewWorkspacePolicy(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewTaskStore(mustJournal(root + "/tasks.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	worker := NewServerWithCapacityAndAuth(store, NewAppServerFactory(mustExecutable(t)), policy, 1, "").(*workerHTTPServer)
+	worker.policyCeiling = "read-only"
+
+	request := validTaskRequest("write-request", "write-task", "write-attempt", 1)
+	request.Workspace.Mode = "write"
+	request.Execution.Sandbox = "workspace-write"
+	payload := mustJSONBytes(t, request)
+	httpRequest := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:14324/v1/tasks", bytes.NewReader(payload))
+	httpRequest.Host = "127.0.0.1:14324"
+	httpRequest.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	worker.ServeHTTP(recorder, httpRequest)
+
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("read-only policy accepted write task with status %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if _, ok := store.Get(request.TaskID); ok {
+		t.Fatal("read-only policy persisted a rejected write task")
+	}
+
+	capabilityRequest := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:14324/v1/worker", nil)
+	capabilityRequest.Host = "127.0.0.1:14324"
+	capabilityRecorder := httptest.NewRecorder()
+	worker.ServeHTTP(capabilityRecorder, capabilityRequest)
+	if capabilityRecorder.Code != http.StatusOK {
+		t.Fatalf("worker capability status = %d", capabilityRecorder.Code)
+	}
+	var capabilityResponse struct {
+		Capabilities codexprotocol.WorkerCapabilities `json:"capabilities"`
+	}
+	if err := json.NewDecoder(capabilityRecorder.Body).Decode(&capabilityResponse); err != nil {
+		t.Fatal(err)
+	}
+	if len(capabilityResponse.Capabilities.WorkspaceModes) != 1 || capabilityResponse.Capabilities.WorkspaceModes[0] != "read" {
+		t.Fatalf("read-only capability advertised workspace modes = %v", capabilityResponse.Capabilities.WorkspaceModes)
+	}
+	if len(capabilityResponse.Capabilities.SandboxModes) != 1 || capabilityResponse.Capabilities.SandboxModes[0] != "read-only" {
+		t.Fatalf("read-only capability advertised sandbox modes = %v", capabilityResponse.Capabilities.SandboxModes)
+	}
+}
+
 func TestApprovalCannotBeRelayedOverHTTP(t *testing.T) {
 	server := newTestHTTPServer(t)
 	request := validTaskRequest("request-1", "task-1", "attempt-1", 1)

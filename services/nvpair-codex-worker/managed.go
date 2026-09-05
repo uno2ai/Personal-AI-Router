@@ -56,6 +56,7 @@ type managedWorkerConfig struct {
 	CredentialGeneration  uint64   `json:"credentialGeneration"`
 	PolicyRevision        uint64   `json:"policyRevision"`
 	ArtifactMaxBytes      int64    `json:"artifactMaxBytes"`
+	PolicyCeiling         string   `json:"policyCeiling"`
 	ToolLabels            []string `json:"toolLabels,omitempty"`
 	WorkspaceAlias        string   `json:"workspaceAlias"`
 }
@@ -87,6 +88,9 @@ func (c managedWorkerConfig) Validate() error {
 	}
 	if c.ArtifactMaxBytes <= 0 {
 		return errors.New("artifactMaxBytes must be positive")
+	}
+	if c.PolicyCeiling != "read-only" && c.PolicyCeiling != "workspace-write" {
+		return fmt.Errorf("unsupported policyCeiling %q", c.PolicyCeiling)
 	}
 	if strings.TrimSpace(c.WorkspaceAlias) == "" {
 		return errors.New("workspaceAlias is required")
@@ -271,6 +275,11 @@ func startManagedWorker(config managedWorkerConfig) (*managedWorkerController, e
 	if err != nil {
 		return nil, fmt.Errorf("workspace policy: %w", err)
 	}
+	probeContext, cancelProbe := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelProbe()
+	if err := NewAppServerFactory(config.CodexBin).Probe(probeContext, config.WorkspaceRoot); err != nil {
+		return nil, fmt.Errorf("app-server readiness probe: %w", err)
+	}
 	journal, err := NewJournal(filepath.Join(config.StateRoot, "tasks.jsonl"))
 	if err != nil {
 		return nil, fmt.Errorf("journal: %w", err)
@@ -290,6 +299,7 @@ func startManagedWorker(config managedWorkerConfig) (*managedWorkerController, e
 		return nil, fmt.Errorf("prune artifacts: %w", err)
 	}
 	worker := NewServerWithArtifacts(store, NewAppServerFactory(config.CodexBin), policy, artifacts, config.MaxConcurrency, config.AuthToken).(*workerHTTPServer)
+	worker.policyCeiling = config.PolicyCeiling
 	worker.toolLabels = append([]string(nil), config.ToolLabels...)
 	certificate, fingerprint, err := localServerCertificate()
 	if err != nil {

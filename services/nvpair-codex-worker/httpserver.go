@@ -50,6 +50,7 @@ type workerHTTPServer struct {
 	artifacts      *ArtifactStore
 	maxConcurrency int
 	authToken      string
+	policyCeiling  string
 	mesh           *clustertrust.Mesh
 	allowedPeers   map[string]bool
 	toolLabels     []string
@@ -203,6 +204,12 @@ func (s *workerHTTPServer) handleWorker(w http.ResponseWriter) {
 	s.mu.Lock()
 	available -= len(s.active)
 	s.mu.Unlock()
+	workspaceModes := []string{"read", "write"}
+	sandboxModes := []string{"read-only", "workspace-write"}
+	if s.policyCeiling == "read-only" {
+		workspaceModes = []string{"read"}
+		sandboxModes = []string{"read-only"}
+	}
 	capabilities := codexprotocol.WorkerCapabilities{
 		ProtocolVersion:  codexprotocol.ProtocolVersion,
 		WorkerVersion:    Version,
@@ -210,9 +217,9 @@ func (s *workerHTTPServer) handleWorker(w http.ResponseWriter) {
 		OS:               runtime.GOOS,
 		Architecture:     runtime.GOARCH,
 		WorkspaceAliases: []string{"local"},
-		WorkspaceModes:   []string{"read", "write"},
+		WorkspaceModes:   workspaceModes,
 		ToolLabels:       append([]string(nil), s.toolLabels...),
-		SandboxModes:     []string{"read-only", "workspace-write"},
+		SandboxModes:     sandboxModes,
 		ApprovalModes:    []string{"local-only"},
 		MaxConcurrency:   s.maxConcurrency,
 		AvailableSlots:   available,
@@ -259,6 +266,10 @@ func (s *workerHTTPServer) handleCreate(w http.ResponseWriter, r *http.Request) 
 	request, err := codexprotocol.DecodeTaskRequest(payload)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if s.policyCeiling == "read-only" && request.Workspace.Mode == "write" {
+		writeError(w, http.StatusForbidden, "managed Worker policy ceiling is read-only")
 		return
 	}
 	request.SupervisorPrincipal = supervisorPrincipal(r)

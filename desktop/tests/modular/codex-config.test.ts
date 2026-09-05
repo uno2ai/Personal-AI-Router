@@ -102,6 +102,7 @@ describe('Codex config defaults', () => {
         manager.setWorkerEnabled(true)
         const workerConfig = fs.readFileSync(path.join(root, 'codex', 'worker-config.json'), 'utf8')
         expect(workerConfig).toContain('authToken')
+        expect(workerConfig).toContain('"policyCeiling": "read-only"')
         expect(fs.statSync(path.join(root, 'codex', 'worker-config.json')).mode & 0o077).toBe(0)
         expect(fs.readFileSync(path.join(root, 'codex', 'config.json'), 'utf8')).not.toContain('authToken')
     })

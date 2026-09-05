@@ -191,6 +191,30 @@ func TestAppServerAdapterRejectsUnsupportedInitializeResponse(t *testing.T) {
 	}
 }
 
+func TestAppServerProbeNegotiatesCompatibilityAndCleansUp(t *testing.T) {
+	logPath := t.TempDir() + "/probe.log"
+	t.Setenv("CODEX_FAKE_APP_SERVER", "1")
+	t.Setenv("CODEX_FAKE_LOG", logPath)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := NewAppServerFactory(buildFakeAppServer(t)).Probe(ctx, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if log := readFixtureLog(t, logPath); !strings.Contains(log, "initialize") || !strings.Contains(log, "initialized") {
+		t.Fatalf("probe did not complete native handshake: %s", log)
+	}
+}
+
+func TestAppServerProbeRejectsUnsupportedInitializeResponse(t *testing.T) {
+	t.Setenv("CODEX_FAKE_APP_SERVER", "1")
+	t.Setenv("CODEX_FAKE_UNSUPPORTED", "1")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := NewAppServerFactory(buildFakeAppServer(t)).Probe(ctx, t.TempDir()); err == nil || !strings.Contains(err.Error(), "unsupported app-server") {
+		t.Fatalf("expected incompatible app-server probe, got %v", err)
+	}
+}
+
 func TestAppServerAdapterResumesPersistedThreadForFollowUp(t *testing.T) {
 	t.Setenv("CODEX_FAKE_APP_SERVER", "1")
 	factory := NewAppServerFactory(buildFakeAppServer(t))
