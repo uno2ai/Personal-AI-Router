@@ -23,6 +23,7 @@ func validManagedConfig(root string) managedWorkerConfig {
 		Generation:            1,
 		WorkspaceRoot:         filepath.Join(root, "workspace"),
 		StateRoot:             filepath.Join(root, "state"),
+		Account:               "test-user",
 		CodexBin:              "codex",
 		MaxConcurrency:        1,
 		AuthToken:             "local-secret",
@@ -69,6 +70,13 @@ func TestManagedWorkerDoesNotReportReadyForMissingCodexExecutable(t *testing.T) 
 	config.CodexBin = filepath.Join(root, "missing-codex")
 	if _, err := startManagedWorker(config); err == nil {
 		t.Fatal("managed Worker reported ready without a usable Codex executable")
+	}
+	descriptor, err := codexruntime.ReadDescriptor(config.RuntimeDescriptorPath, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if descriptor.State != codexruntime.RuntimeStateUnavailable || descriptor.Error == "" {
+		t.Fatalf("failure descriptor = %+v", descriptor)
 	}
 }
 

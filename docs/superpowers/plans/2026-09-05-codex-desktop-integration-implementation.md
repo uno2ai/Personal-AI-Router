@@ -22,6 +22,10 @@
 - Every production code change follows a red test, expected failure, minimal green implementation, and full affected-suite verification before refactoring.
 - No implementation task is considered complete without a named test command and captured exit status.
 
+**Execution checkpoint:** Tasks 1–4 and the local portions of Tasks 5–6 are
+implemented on `main` without a fork or push. Native packaged Electron/Main
+Codex acceptance and remote/platform release oracles remain explicitly open.
+
 ---
 
 ## Code map
@@ -255,24 +259,24 @@
 - The store exposes the documented states `disabled`, `setup_required`, `starting`, `ready`, `busy`, `unauthorized`, `incompatible`, `failed`, and `stopped`.
 - UI displays Worker, task ID, state, attempt, timestamps, and artifact metadata only; it never renders prompts, raw responses, credentials, hidden reasoning, or artifact bodies.
 
-- [ ] **Step 1: Write failing store/UI tests.**
+- [x] **Step 1: Write failing store/UI tests.**
 
   Cover disabled-by-default behavior, local read-only default, explicit write
   consent, actionable missing-prerequisite state, state updates after broker
   restart, task pagination, and opaque cancellation references.
 
-- [ ] **Step 2: Run the focused tests and verify red.**
+- [x] **Step 2: Run the focused tests and verify red.**
 
   Run the two new Vitest files; they must fail because the Codex store and
   components are not present.
 
-- [ ] **Step 3: Implement the store and settings/task surfaces.**
+- [x] **Step 3: Implement the store and settings/task surfaces.**
 
   Connect only to typed preload methods, make Worker enablement explicit, show
   local/remote and read-only/read-write capability separately, and keep
   metadata bounded and freshness-labeled.
 
-- [ ] **Step 4: Run the full Desktop unit/typecheck suites and commit.**
+- [x] **Step 4: Run the full Desktop unit/typecheck suites and commit.**
 
   Run `npm run test:unit -- --run` and `npm run typecheck`, then commit with
   `feat: expose Codex Worker state and tasks in Desktop`.
@@ -293,19 +297,19 @@
 - Installer cleanup uses installation-owned process IDs/jobs/services and managed registration/firewall ownership; it never kills by global image name.
 - The packaged test suite has a non-empty named E2E project and verifies the real packaged binary manifest, broker-owned Worker, Main MCP registration, local task, remote task, cancellation, restart, and independent Worker coexistence.
 
-- [ ] **Step 1: Write failing package/E2E contract tests.**
+- [x] **Step 1: Write failing package/E2E contract tests.**
 
   Assert both Codex binaries are present in the final manifest, the Supervisor
   is not listed as an Electron runtime child, E2E include patterns are
   non-empty, and an unrelated Worker PID/config/firewall entry is preserved.
 
-- [ ] **Step 2: Run the focused tests and verify red.**
+- [x] **Step 2: Run the focused tests and verify red.**
 
   Run `npm exec vitest run tests/modular/codex-packaging.test.ts` and the E2E
   project selector; failures must identify the missing package or suite rather
   than silently passing zero tests.
 
-- [ ] **Step 3: Implement scoped platform lifecycle and package checks.**
+- [x] **Step 3: Implement scoped platform lifecycle and package checks.**
 
   Add conditional local/remote firewall behavior, versioned manifests, update
   drain/restart coordination, installation-owned cleanup, and platform-specific

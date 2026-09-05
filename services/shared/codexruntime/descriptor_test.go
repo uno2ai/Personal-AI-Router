@@ -126,3 +126,16 @@ func TestReadDescriptorRejectsTrailingJSON(t *testing.T) {
 		t.Fatal("ReadDescriptor accepted trailing JSON")
 	}
 }
+
+func TestUnavailableDescriptorMayCarryActionableErrorWithoutAnEndpoint(t *testing.T) {
+	now := time.Now().UTC()
+	descriptor := validDescriptor(now)
+	descriptor.State = RuntimeStateUnavailable
+	descriptor.Endpoint = ""
+	descriptor.Transport = ""
+	descriptor.ServerCertificateSHA256 = ""
+	descriptor.Error = "unsupported app-server initialize response"
+	if err := descriptor.Validate(now); err != nil {
+		t.Fatalf("Validate() rejected failure descriptor: %v", err)
+	}
+}

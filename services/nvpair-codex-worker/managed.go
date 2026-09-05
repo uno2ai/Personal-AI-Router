@@ -48,6 +48,7 @@ type managedWorkerConfig struct {
 	Generation            uint64   `json:"generation"`
 	WorkspaceRoot         string   `json:"workspaceRoot"`
 	StateRoot             string   `json:"stateRoot"`
+	Account               string   `json:"account"`
 	CodexBin              string   `json:"codexBin"`
 	MaxConcurrency        int      `json:"maxConcurrency"`
 	AuthToken             string   `json:"authToken"`
@@ -73,6 +74,9 @@ func (c managedWorkerConfig) Validate() error {
 	}
 	if !filepath.IsAbs(c.WorkspaceRoot) || !filepath.IsAbs(c.StateRoot) {
 		return errors.New("workspaceRoot and stateRoot must be absolute paths")
+	}
+	if strings.TrimSpace(c.Account) == "" {
+		return errors.New("account is required")
 	}
 	if strings.TrimSpace(c.CodexBin) == "" || strings.TrimSpace(c.AuthToken) == "" {
 		return errors.New("codexBin and authToken are required")
@@ -262,22 +266,27 @@ func startManagedWorker(config managedWorkerConfig) (*managedWorkerController, e
 	}
 	codexBin, err := resolveCodexExecutable(config.CodexBin)
 	if err != nil {
+		writeManagedUnavailableDescriptor(config, err)
 		return nil, err
 	}
 	config.CodexBin = codexBin
 	if err := os.MkdirAll(config.WorkspaceRoot, 0o700); err != nil {
+		writeManagedUnavailableDescriptor(config, err)
 		return nil, fmt.Errorf("create Worker workspace: %w", err)
 	}
 	if err := os.MkdirAll(config.StateRoot, 0o700); err != nil {
+		writeManagedUnavailableDescriptor(config, err)
 		return nil, fmt.Errorf("create Worker state root: %w", err)
 	}
 	policy, err := NewWorkspacePolicy(config.WorkspaceRoot)
 	if err != nil {
+		writeManagedUnavailableDescriptor(config, err)
 		return nil, fmt.Errorf("workspace policy: %w", err)
 	}
 	probeContext, cancelProbe := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancelProbe()
 	if err := NewAppServerFactory(config.CodexBin).Probe(probeContext, config.WorkspaceRoot); err != nil {
+		writeManagedUnavailableDescriptor(config, err)
 		return nil, fmt.Errorf("app-server readiness probe: %w", err)
 	}
 	journal, err := NewJournal(filepath.Join(config.StateRoot, "tasks.jsonl"))
@@ -354,6 +363,31 @@ func startManagedWorker(config managedWorkerConfig) (*managedWorkerController, e
 		}
 	}()
 	return controller, nil
+}
+
+func writeManagedUnavailableDescriptor(config managedWorkerConfig, cause error) {
+	now := time.Now().UTC()
+	message := "managed Worker is unavailable"
+	if cause != nil {
+		message = cause.Error()
+	}
+	if len(message) > 4096 {
+		message = message[:4096]
+	}
+	_ = codexruntime.WriteDescriptor(config.RuntimeDescriptorPath, codexruntime.RuntimeDescriptor{
+		SchemaVersion:        codexruntime.RuntimeSchemaVersion,
+		InstallationID:       config.InstallationID,
+		WorkerInstanceID:     config.WorkerInstanceID,
+		BootEpoch:            max(config.BootEpoch, uint64(now.UnixNano())),
+		Generation:           config.Generation,
+		WrittenAt:            now,
+		ExpiresAt:            now.Add(24 * time.Hour),
+		CredentialRef:        config.CredentialRef,
+		CredentialGeneration: config.CredentialGeneration,
+		PolicyRevision:       config.PolicyRevision,
+		State:                codexruntime.RuntimeStateUnavailable,
+		Error:                message,
+	})
 }
 
 func resolveCodexExecutable(value string) (string, error) {

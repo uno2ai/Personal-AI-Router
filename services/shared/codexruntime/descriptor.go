@@ -55,6 +55,7 @@ type RuntimeDescriptor struct {
 	CredentialGeneration    uint64       `json:"credentialGeneration"`
 	PolicyRevision          uint64       `json:"policyRevision"`
 	State                   RuntimeState `json:"state"`
+	Error                   string       `json:"error,omitempty"`
 }
 
 func (d RuntimeDescriptor) Validate(now time.Time) error {
@@ -73,15 +74,8 @@ func (d RuntimeDescriptor) Validate(now time.Time) error {
 	if !d.ExpiresAt.After(now) {
 		return errors.New("runtime descriptor is expired")
 	}
-	u, err := url.Parse(d.Endpoint)
-	if err != nil || u.Scheme != "https" || u.Host == "" {
-		return errors.New("endpoint must be an https URL")
-	}
-	if d.Transport != TransportPinnedLocalTLS && d.Transport != TransportMTLS {
-		return fmt.Errorf("unsupported runtime transport %q", d.Transport)
-	}
-	if strings.TrimSpace(d.ServerCertificateSHA256) == "" {
-		return errors.New("serverCertificateSha256 is required")
+	if len(d.Error) > 4096 {
+		return errors.New("runtime descriptor error is too long")
 	}
 	if strings.TrimSpace(d.CredentialRef) == "" || d.CredentialGeneration == 0 {
 		return errors.New("credential reference and generation are required")
@@ -93,6 +87,18 @@ func (d RuntimeDescriptor) Validate(now time.Time) error {
 	case RuntimeStateStarting, RuntimeStateReady, RuntimeStateBusy, RuntimeStateDraining, RuntimeStateUnavailable, RuntimeStateStopped:
 	default:
 		return fmt.Errorf("unsupported runtime state %q", d.State)
+	}
+	if d.State != RuntimeStateUnavailable && d.State != RuntimeStateStopped {
+		u, err := url.Parse(d.Endpoint)
+		if err != nil || u.Scheme != "https" || u.Host == "" {
+			return errors.New("endpoint must be an https URL")
+		}
+		if d.Transport != TransportPinnedLocalTLS && d.Transport != TransportMTLS {
+			return fmt.Errorf("unsupported runtime transport %q", d.Transport)
+		}
+		if strings.TrimSpace(d.ServerCertificateSHA256) == "" {
+			return errors.New("serverCertificateSha256 is required")
+		}
 	}
 	return nil
 }

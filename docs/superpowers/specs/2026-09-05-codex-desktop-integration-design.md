@@ -1,6 +1,6 @@
 # Codex Desktop Integration Design
 
-**Status:** Blocked pending contract and security gates
+**Status:** Implementation in progress; desktop/backend contracts are wired, native release gates remain
 **Date:** 2026-09-05  
 **Parent design:** [Codex Supervisor Pair Control Plane](2026-09-04-codex-supervisor-pair-control-plane.md)
 
@@ -92,6 +92,18 @@ The existing repository does not yet provide these properties merely because
 the binaries build or the backend unit tests pass. The implementation plan
 must therefore start with contract and adversarial tests, then wire the
 desktop surface only after those gates are green.
+
+### 2.2 Implementation checkpoint
+
+The contract implementation now includes packaged Worker/Supervisor inventory,
+broker-owned managed Worker lifecycle, protected runtime descriptors, native
+app-server readiness probing, policy-ceiling enforcement, durable Supervisor
+dispatch intent, per-state-root instance locking, Unix management sockets and
+Windows named-pipe management, typed Desktop IPC/UI, metadata-only task
+projection, and scoped Codex installer behavior. The remaining release gates
+are native packaged Electron/Main-Codex execution, remote discovery/revocation
+measurement, and platform-matrix upgrade/uninstall oracles; those are not
+claimed by unit or cross-compilation results alone.
 
 ## 3. Goals
 
@@ -478,8 +490,8 @@ Platform-specific requirements:
 
 ## 9. Implementation gates and phases
 
-Implementation is blocked until these gates have executable contracts and
-adversarial tests:
+Release implementation remains gated until these criteria have executable
+contracts and adversarial tests:
 
 1. **Contract gate:** supported Main client/config scope, instance multiplicity,
    transport/authentication, owner policy, workspace identity, schemas, and

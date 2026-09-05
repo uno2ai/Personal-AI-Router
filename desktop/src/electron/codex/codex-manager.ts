@@ -37,6 +37,7 @@ interface ManagedWorkerConfig {
     generation: number
     workspaceRoot: string
     stateRoot: string
+    account: string
     codexBin: string
     maxConcurrency: number
     authToken: string
@@ -186,7 +187,19 @@ export class CodexManager {
             if (!expiresAt || expiresAt <= Date.now()) {
                 return { state: 'failed', enabled: true, policyCeiling: config.policyCeiling, endpoint: null, workerInstanceId: config.workerInstanceId, bootEpoch: null, policyRevision: config.policyRevision, error: 'Worker runtime descriptor is expired' }
             }
-            const state = descriptor.state === 'busy' ? 'busy' : descriptor.state === 'ready' ? 'ready' : 'starting'
+            const descriptorError = typeof descriptor.error === 'string' ? descriptor.error : undefined
+            let state: CodexWorkerStateSnapshot['state'] = 'starting'
+            if (descriptor.state === 'busy') state = 'busy'
+            else if (descriptor.state === 'ready') state = 'ready'
+            else if (descriptor.state === 'stopped') state = 'stopped'
+            else if (descriptor.state === 'unavailable') {
+                const lower = descriptorError?.toLowerCase() ?? ''
+                state = lower.includes('unsupported app-server')
+                    ? 'incompatible'
+                    : lower.includes('login') || lower.includes('account') || lower.includes('auth')
+                      ? 'unauthorized'
+                      : 'failed'
+            }
             return {
                 state,
                 enabled: true,
@@ -194,7 +207,8 @@ export class CodexManager {
                 endpoint: typeof descriptor.endpoint === 'string' ? descriptor.endpoint : null,
                 workerInstanceId: typeof descriptor.workerInstanceId === 'string' ? descriptor.workerInstanceId : config.workerInstanceId,
                 bootEpoch: typeof descriptor.bootEpoch === 'number' ? descriptor.bootEpoch : null,
-                policyRevision: config.policyRevision
+                policyRevision: config.policyRevision,
+                ...(descriptorError ? { error: descriptorError } : {})
             }
         } catch (error) {
             return { state: 'failed', enabled: true, policyCeiling: config.policyCeiling, endpoint: null, workerInstanceId: config.workerInstanceId, bootEpoch: null, policyRevision: config.policyRevision, error: error instanceof Error ? error.message : String(error) }
@@ -210,6 +224,7 @@ export class CodexManager {
             generation: 1,
             workspaceRoot: config.workspaceRoot,
             stateRoot: config.stateRoot,
+            account: config.account,
             codexBin: config.codexExecutable,
             maxConcurrency: 1,
             authToken: crypto.randomBytes(32).toString('hex'),
