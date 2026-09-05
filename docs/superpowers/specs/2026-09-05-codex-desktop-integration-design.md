@@ -1,14 +1,14 @@
 # Codex Desktop Integration Design
 
-**Status:** macOS arm64 implementation and local acceptance complete; signed/notarized distribution and Windows/Linux native validation are not claimed
+**Status:** Personal-use macOS arm64 implementation and acceptance complete; Windows/Linux native validation is excluded
 **Date:** 2026-09-05  
 **Parent design:** [Codex Supervisor Pair Control Plane](2026-09-04-codex-supervisor-pair-control-plane.md)
 
 **Last review:** Astra max adversarial review of the desktop integration design.
 The top-level process ownership split was retained. Its implementation-blocking
 contracts and macOS security gates are now closed by the tests and native
-acceptance evidence recorded below; signing/notarization and excluded-platform
-release validation remain separate distribution gates.
+acceptance evidence recorded below. Windows/Linux release validation is outside
+the personal-use scope.
 
 ## 1. Decision summary
 
@@ -465,7 +465,7 @@ The desktop inventory becomes 15 shipped components:
 - keep the standalone services installer for remote Worker hosts;
 - do not add an inbound firewall rule for local-only mode;
 - add a scoped Worker firewall rule only when the user enables remote mode;
-- use versioned, installation-owned binaries and a post-signing manifest;
+- use versioned, installation-owned binaries and a final package manifest;
 - never stop processes by global image name; cleanup is limited to recorded
   process IDs/jobs/services owned by this installation;
 - preserve or explicitly drain Main-owned Supervisor instances during Desktop
@@ -501,9 +501,9 @@ Platform-specific requirements:
 - Windows: Job Objects for task descendants, user-scoped state ACLs, actual
   executable/service stop coordination, junction/reparse checks, and x64/arm64
   packaged execution tests.
-- macOS: absolute executable paths, user-session launch context, signatures,
-  permissions, LaunchAgent behavior, and no dependence on privileged helper for
-  task execution.
+- macOS: absolute executable paths, user-session launch context, permissions,
+  LaunchAgent behavior, and no dependence on a privileged helper for task
+  execution.
 - Linux: user-service or explicitly configured system-service mode, cgroup/
   process-group cleanup, environment/path validation, restart limits, and
   package pre-removal coordination.

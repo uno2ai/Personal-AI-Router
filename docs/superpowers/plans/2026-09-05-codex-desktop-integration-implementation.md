@@ -365,10 +365,8 @@ checkpoint.
 - [x] `git diff --check`, full tests, typechecks, package manifest verification, and native acceptance all pass on the claimed macOS arm64 platform.
 - [x] No push or merge is performed without an explicit user request.
 
-The generated macOS artifact is unsigned. Apple Developer signing,
-notarization, and a Gatekeeper install/upgrade/uninstall run from the signed DMG
-remain external distribution gates requiring release credentials. Windows and
-Linux native validation are excluded by the current implementation scope.
+The personal-use macOS scope is complete. Windows and Linux native validation
+are excluded by the current implementation scope.
 
 ### Final macOS verification evidence
 
