@@ -106,9 +106,11 @@ local Worker→Supervisor MCP smoke test now covers a real installed Codex CLI
 through a completed read-only handoff. A macOS arm64 Electron package was also
 built and launched from its packaged app directory: the package contained both
 Codex binaries, the packaged broker started, and the broker resolved the
-packaged Worker path. The remaining release gates are a real Main-Codex MCP
-client session against that packaged app, measured platform-matrix revocation
-and cleanup, and upgrade/uninstall oracles; those are not claimed by unit,
+packaged Worker path. Separately, the installed Main Codex CLI launched that
+packaged Supervisor and completed `workers.list` against a managed native
+Worker. The remaining release gates are the combined Electron-owned enabled
+Worker plus Main-Codex session, measured platform-matrix revocation and
+cleanup, and upgrade/uninstall oracles; those are not claimed by unit,
 cross-compilation, or a raw MCP-client smoke alone.
 
 ## 3. Goals
@@ -648,5 +650,7 @@ necessary but not sufficient:
       acceptance suites.
 - [x] macOS arm64 package contains the Codex binaries and starts the packaged
       Electron broker with the packaged Worker path.
+- [x] Installed Main Codex CLI can launch the packaged Supervisor and complete
+      a read-only `workers.list` call against a managed Worker.
 - [ ] User review of this written design.
 - [x] Implementation plan and code changes.

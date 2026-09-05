@@ -28,8 +28,11 @@ smoke now delegates a real read-only task through the installed Codex CLI;
 live remote discovery and Main registration activation state are also wired.
 The macOS arm64 Electron package now builds and launches in an isolated HOME;
 the packaged broker reaches `app:ready` and receives the packaged Codex Worker
-path. A real packaged Main Codex MCP session, platform-matrix revocation and
-cleanup measurements, and upgrade/uninstall oracles remain explicitly open.
+path. The installed Main Codex CLI also launched the packaged Supervisor and
+completed a read-only `workers.list` call against a managed Worker. A combined
+Electron-owned enabled Worker plus Main Codex session, platform-matrix
+revocation and cleanup measurements, and upgrade/uninstall oracles remain
+explicitly open.
 
 ---
 
@@ -324,9 +327,11 @@ cleanup measurements, and upgrade/uninstall oracles remain explicitly open.
 
   The local native Worker/Supervisor portion is implemented and runs as the
   opt-in `codex-desktop.e2e.test.ts` suite. The macOS arm64 package build and
-  isolated packaged Electron startup smoke are also verified. The full step
-  remains open until the packaged Main Codex client, restart, revocation, and
-  independent Worker coexistence assertions are executed.
+  isolated packaged Electron startup smoke are also verified. An installed
+  Main Codex CLI has launched the packaged Supervisor and completed
+  `workers.list`; the full step remains open until that client is combined
+  with the Electron-owned enabled Worker, plus restart, revocation, and
+  independent Worker coexistence assertions.
 
   Start the built broker/Worker/Supervisor on the supported host, use the real
   Main Codex MCP client contract, run a bounded read-only task, revoke trust,
