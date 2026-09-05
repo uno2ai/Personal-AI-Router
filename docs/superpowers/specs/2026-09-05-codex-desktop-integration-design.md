@@ -1,6 +1,6 @@
 # Codex Desktop Integration Design
 
-**Status:** Implementation in progress; desktop/backend contracts are wired, native release gates remain
+**Status:** Implementation in progress; local native delegation and live discovery are wired, packaged release gates remain
 **Date:** 2026-09-05  
 **Parent design:** [Codex Supervisor Pair Control Plane](2026-09-04-codex-supervisor-pair-control-plane.md)
 
@@ -100,10 +100,13 @@ broker-owned managed Worker lifecycle, protected runtime descriptors, native
 app-server readiness probing, policy-ceiling enforcement, durable Supervisor
 dispatch intent, per-state-root instance locking, Unix management sockets and
 Windows named-pipe management, typed Desktop IPC/UI, metadata-only task
-projection, and scoped Codex installer behavior. The remaining release gates
-are native packaged Electron/Main-Codex execution, remote discovery/revocation
-measurement, and platform-matrix upgrade/uninstall oracles; those are not
-claimed by unit or cross-compilation results alone.
+projection, live pinned remote discovery with revocation removal, connected vs
+waiting Main registration state, and scoped Codex installer behavior. A native
+local Worker→Supervisor MCP smoke test now covers a real installed Codex CLI
+through a completed read-only handoff. The remaining release gates are
+packaged Electron/Main-Codex execution, measured platform-matrix revocation
+and cleanup, and upgrade/uninstall oracles; those are not claimed by unit or
+cross-compilation results alone.
 
 ## 3. Goals
 
