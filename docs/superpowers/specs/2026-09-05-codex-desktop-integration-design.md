@@ -1,6 +1,6 @@
 # Codex Desktop Integration Design
 
-**Status:** Implementation in progress; local native delegation and live discovery are wired, packaged release gates remain
+**Status:** Implementation in progress; local native delegation, live discovery, and macOS arm64 packaged Electron startup are wired and verified; Main Codex and platform release gates remain
 **Date:** 2026-09-05  
 **Parent design:** [Codex Supervisor Pair Control Plane](2026-09-04-codex-supervisor-pair-control-plane.md)
 
@@ -103,10 +103,13 @@ Windows named-pipe management, typed Desktop IPC/UI, metadata-only task
 projection, live pinned remote discovery with revocation removal, connected vs
 waiting Main registration state, and scoped Codex installer behavior. A native
 local Worker→Supervisor MCP smoke test now covers a real installed Codex CLI
-through a completed read-only handoff. The remaining release gates are
-packaged Electron/Main-Codex execution, measured platform-matrix revocation
-and cleanup, and upgrade/uninstall oracles; those are not claimed by unit or
-cross-compilation results alone.
+through a completed read-only handoff. A macOS arm64 Electron package was also
+built and launched from its packaged app directory: the package contained both
+Codex binaries, the packaged broker started, and the broker resolved the
+packaged Worker path. The remaining release gates are a real Main-Codex MCP
+client session against that packaged app, measured platform-matrix revocation
+and cleanup, and upgrade/uninstall oracles; those are not claimed by unit,
+cross-compilation, or a raw MCP-client smoke alone.
 
 ## 3. Goals
 
@@ -634,14 +637,16 @@ necessary but not sufficient:
       included.
 - [x] Astra max review consolidated into explicit contract, security, installer,
       and release gates.
-- [ ] Local runtime descriptor, endpoint credential generation, and transport
+- [x] Local runtime descriptor, endpoint credential generation, and transport
       contract.
 - [ ] Supported Main client/config/reload contract and multi-instance registry.
 - [ ] Worker child isolation, owner binding, pre-dispatch recovery, process
       cleanup proof, and cross-process workspace fencing.
-- [ ] Broker managed-control protocol and dynamic discovery/revocation contract.
-- [ ] Exact renderer origin/frame/schema enforcement and typed IPC implementation.
+- [x] Broker managed-control protocol and dynamic discovery/revocation contract.
+- [x] Exact renderer origin/frame/schema enforcement and typed IPC implementation.
 - [ ] Scoped installer/update/uninstall behavior and non-empty packaged native
       acceptance suites.
+- [x] macOS arm64 package contains the Codex binaries and starts the packaged
+      Electron broker with the packaged Worker path.
 - [ ] User review of this written design.
-- [ ] Implementation plan and code changes.
+- [x] Implementation plan and code changes.
