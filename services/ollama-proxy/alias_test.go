@@ -179,7 +179,7 @@ func TestAliasPortIsAProxySelfTarget(t *testing.T) {
 func TestAliasSelfTargetMatchesBoundLoopbackAddressNotPortAlone(t *testing.T) {
 	probe, err := net.Listen("tcp", "127.0.0.2:0")
 	if err != nil {
-		t.Fatalf("reserve 127.0.0.2 test port: %v", err)
+		t.Skipf("secondary loopback address is unavailable on this host: %v", err)
 	}
 	aliasPort := probe.Addr().(*net.TCPAddr).Port
 	_ = probe.Close()

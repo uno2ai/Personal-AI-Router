@@ -30,14 +30,147 @@ var Version = "dev"
 const SupportedAppServerVersion = "codex-app-server-v1"
 
 type AppServerFactory struct {
-	binary string
+	binary       string
+	isolatedHome *isolatedCodexHome
 }
 
-func NewAppServerFactory(binary string) AppServerFactory {
+type isolatedCodexHome struct {
+	path string
+	mu   sync.Mutex
+}
+
+func NewAppServerFactory(binary string, stateRoot ...string) AppServerFactory {
 	if binary == "" {
 		binary = "codex"
 	}
-	return AppServerFactory{binary: binary}
+	factory := AppServerFactory{binary: binary}
+	if len(stateRoot) > 0 && strings.TrimSpace(stateRoot[0]) != "" {
+		factory.isolatedHome = &isolatedCodexHome{path: filepath.Join(stateRoot[0], "child-codex-home")}
+	}
+	return factory
+}
+
+// appServerArguments prevents a delegated Worker child from recursively
+// loading Main Codex's MCP servers, apps, plugins, or hooks. The child still
+// uses the user's normal Codex authentication, model settings, and native
+// app-server protocol; only extension surfaces that could route execution back
+// into Main are disabled at the command-line layer.
+func appServerArguments() []string {
+	return []string{
+		"app-server",
+		"--disable", "plugins",
+		"--disable", "hooks",
+		"--disable", "apps",
+		"--disable", "enable_mcp_apps",
+		"--disable", "skill_mcp_dependency_install",
+		"--listen", "stdio://",
+	}
+}
+
+func (f AppServerFactory) command() (*exec.Cmd, error) {
+	cmd := exec.Command(f.binary, appServerArguments()...)
+	if f.isolatedHome == nil {
+		return cmd, nil
+	}
+	if err := f.isolatedHome.prepare(); err != nil {
+		return nil, err
+	}
+	cmd.Env = replaceEnvironment(os.Environ(), map[string]string{
+		"CODEX_HOME":        f.isolatedHome.path,
+		"CODEX_SQLITE_HOME": filepath.Join(f.isolatedHome.path, "sqlite"),
+	})
+	return cmd, nil
+}
+
+func (h *isolatedCodexHome) prepare() error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if err := os.MkdirAll(h.path, 0o700); err != nil {
+		return fmt.Errorf("create isolated Codex home: %w", err)
+	}
+	if err := os.Chmod(h.path, 0o700); err != nil {
+		return fmt.Errorf("protect isolated Codex home: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Join(h.path, "sqlite"), 0o700); err != nil {
+		return fmt.Errorf("create isolated Codex sqlite home: %w", err)
+	}
+	return syncCodexAuth(h.path)
+}
+
+func syncCodexAuth(isolatedHome string) error {
+	sourceHome := strings.TrimSpace(os.Getenv("CODEX_HOME"))
+	if sourceHome == "" {
+		userHome, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("resolve Codex authentication home: %w", err)
+		}
+		sourceHome = filepath.Join(userHome, ".codex")
+	}
+	source := filepath.Join(sourceHome, "auth.json")
+	destination := filepath.Join(isolatedHome, "auth.json")
+	sourceInfo, err := os.Stat(source)
+	if errors.Is(err, os.ErrNotExist) {
+		if removeErr := os.Remove(destination); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			return fmt.Errorf("remove stale isolated Codex authentication: %w", removeErr)
+		}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect Codex authentication: %w", err)
+	}
+	if destinationInfo, statErr := os.Stat(destination); statErr == nil && !sourceInfo.ModTime().After(destinationInfo.ModTime()) {
+		return nil
+	}
+	data, err := os.ReadFile(source)
+	if err != nil {
+		return fmt.Errorf("read Codex authentication: %w", err)
+	}
+	temporary, err := os.CreateTemp(isolatedHome, ".auth-*.tmp")
+	if err != nil {
+		return fmt.Errorf("stage isolated Codex authentication: %w", err)
+	}
+	temporaryPath := temporary.Name()
+	committed := false
+	defer func() {
+		_ = temporary.Close()
+		if !committed {
+			_ = os.Remove(temporaryPath)
+		}
+	}()
+	if err := temporary.Chmod(0o600); err != nil {
+		return fmt.Errorf("protect staged Codex authentication: %w", err)
+	}
+	if _, err := temporary.Write(data); err != nil {
+		return fmt.Errorf("write staged Codex authentication: %w", err)
+	}
+	if err := temporary.Sync(); err != nil {
+		return fmt.Errorf("sync staged Codex authentication: %w", err)
+	}
+	if err := temporary.Close(); err != nil {
+		return fmt.Errorf("close staged Codex authentication: %w", err)
+	}
+	if err := os.Rename(temporaryPath, destination); err != nil {
+		return fmt.Errorf("install isolated Codex authentication: %w", err)
+	}
+	committed = true
+	return nil
+}
+
+func replaceEnvironment(environment []string, replacements map[string]string) []string {
+	result := make([]string, 0, len(environment)+len(replacements))
+	for _, entry := range environment {
+		key, _, found := strings.Cut(entry, "=")
+		if found {
+			if _, replaced := replacements[key]; replaced {
+				continue
+			}
+		}
+		result = append(result, entry)
+	}
+	for key, value := range replacements {
+		result = append(result, key+"="+value)
+	}
+	return result
 }
 
 // Probe starts the configured native app-server long enough to negotiate the
@@ -49,7 +182,10 @@ func (f AppServerFactory) Probe(ctx context.Context, cwd string) error {
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command(f.binary, "app-server", "--listen", "stdio://")
+	cmd, err := f.command()
+	if err != nil {
+		return fmt.Errorf("prepare isolated app-server configuration: %w", err)
+	}
 	cleanupChild, verifyChild, err := prepareChildProcess(cmd, resolvedCWD)
 	if err != nil {
 		return fmt.Errorf("prepare app-server probe: %w", err)
@@ -126,6 +262,9 @@ func (f AppServerFactory) Probe(ctx context.Context, cwd string) error {
 	if err := peer.Notify("initialized", map[string]any{}); err != nil {
 		return cleanup(fmt.Errorf("app-server probe initialized: %w", err))
 	}
+	if err := verifyNoMCPConfiguration(ctx, peer, resolvedCWD); err != nil {
+		return cleanup(err)
+	}
 	call := <-resultCh
 	result, rpcErr, err := call.result, call.rpcErr, call.err
 	if err := formatProbeInitializeResult(result, rpcErr, err); err != nil {
@@ -144,6 +283,78 @@ func formatProbeInitializeResult(result json.RawMessage, rpcErr *jsonrpc.RPCErro
 	return validateAppServerInitialize(result)
 }
 
+func verifyNoMCPConfiguration(ctx context.Context, peer *jsonrpc.Peer, cwd string) error {
+	result, rpcErr, err := peer.Call(ctx, "config/read", mustJSON(map[string]any{
+		"cwd":           cwd,
+		"includeLayers": true,
+	}))
+	if err != nil {
+		return fmt.Errorf("verify app-server MCP isolation: %w", err)
+	}
+	if rpcErr != nil {
+		return fmt.Errorf("verify app-server MCP isolation: %s", rpcErr.Message)
+	}
+	var response struct {
+		Layers []struct {
+			Config         json.RawMessage `json:"config"`
+			DisabledReason *string         `json:"disabledReason"`
+		} `json:"layers"`
+	}
+	if err := json.Unmarshal(result, &response); err != nil {
+		return fmt.Errorf("verify app-server MCP isolation response: %w", err)
+	}
+	if response.Layers == nil {
+		return errors.New("verify app-server MCP isolation response: config layers are missing")
+	}
+	for _, layer := range response.Layers {
+		if layer.DisabledReason != nil {
+			continue
+		}
+		var config any
+		if err := json.Unmarshal(layer.Config, &config); err != nil {
+			return fmt.Errorf("verify app-server MCP isolation layer: %w", err)
+		}
+		if containsConfiguredMCP(config) {
+			return errors.New("app-server MCP configuration is present in an active config layer")
+		}
+	}
+	return nil
+}
+
+func containsConfiguredMCP(value any) bool {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, nested := range typed {
+			if (key == "mcp_servers" || key == "mcpServers") && !emptyConfigurationValue(nested) {
+				return true
+			}
+			if containsConfiguredMCP(nested) {
+				return true
+			}
+		}
+	case []any:
+		for _, nested := range typed {
+			if containsConfiguredMCP(nested) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func emptyConfigurationValue(value any) bool {
+	switch typed := value.(type) {
+	case nil:
+		return true
+	case map[string]any:
+		return len(typed) == 0
+	case []any:
+		return len(typed) == 0
+	default:
+		return false
+	}
+}
+
 type probeWriteSignal struct {
 	io.Writer
 	written chan struct{}
@@ -159,11 +370,11 @@ func (w *probeWriteSignal) Write(data []byte) (int, error) {
 }
 
 func (f AppServerFactory) New() *AppServerSession {
-	return &AppServerSession{binary: f.binary}
+	return &AppServerSession{factory: f}
 }
 
 type AppServerSession struct {
-	binary string
+	factory AppServerFactory
 
 	mu            sync.Mutex
 	peer          *jsonrpc.Peer
@@ -222,7 +433,10 @@ func (s *AppServerSession) runWithThread(ctx context.Context, request codexproto
 		s.mu.Unlock()
 	}()
 
-	cmd := exec.Command(s.binary, "app-server", "--listen", "stdio://")
+	cmd, err := s.factory.command()
+	if err != nil {
+		return codexprotocol.Handoff{}, fmt.Errorf("prepare isolated app-server configuration: %w", err)
+	}
 	cleanupChild, verifyChild, err := prepareChildProcess(cmd, cwd)
 	if err != nil {
 		return codexprotocol.Handoff{}, err
@@ -289,6 +503,9 @@ func (s *AppServerSession) runWithThread(ctx context.Context, request codexproto
 	}
 	if err := peer.Notify("initialized", map[string]any{}); err != nil {
 		return s.failedProcess(cmd, stdin, peer, waitCh, serveDone, fmt.Errorf("app-server initialized: %w", err))
+	}
+	if err := verifyNoMCPConfiguration(callCtx, peer, cwd); err != nil {
+		return s.failedProcess(cmd, stdin, peer, waitCh, serveDone, err)
 	}
 	var threadResult json.RawMessage
 	if resumeThreadID == "" {

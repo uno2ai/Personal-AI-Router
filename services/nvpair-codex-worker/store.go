@@ -35,6 +35,7 @@ type TaskStore struct {
 	requestRecords   map[string]codexprotocol.TaskRecord
 	appliedMutations map[string]string
 	workspaceLeases  map[string]string
+	processLeases    map[string]*workspaceProcessLease
 }
 
 func NewTaskStore(journal *Journal) (*TaskStore, error) {
@@ -50,6 +51,7 @@ func NewTaskStore(journal *Journal) (*TaskStore, error) {
 		requestRecords:   make(map[string]codexprotocol.TaskRecord),
 		appliedMutations: make(map[string]string),
 		workspaceLeases:  make(map[string]string),
+		processLeases:    make(map[string]*workspaceProcessLease),
 	}
 	entries, err := journal.Replay()
 	if err != nil {
@@ -58,7 +60,20 @@ func NewTaskStore(journal *Journal) (*TaskStore, error) {
 	for _, entry := range entries {
 		store.apply(entry)
 	}
+	leaseKeys := make([]string, 0, len(store.workspaceLeases))
+	for key := range store.workspaceLeases {
+		leaseKeys = append(leaseKeys, key)
+	}
+	sort.Strings(leaseKeys)
+	for _, key := range leaseKeys {
+		if err := store.acquireProcessLease(key); err != nil {
+			store.releaseAllProcessLeases()
+			_ = journal.Close()
+			return nil, fmt.Errorf("restore workspace lease: %w", err)
+		}
+	}
 	if err := store.reconcileUnresolved(); err != nil {
+		store.releaseAllProcessLeases()
 		_ = journal.Close()
 		return nil, err
 	}
@@ -131,6 +146,13 @@ func (s *TaskStore) PrepareFollowUp(mutation codexprotocol.Mutation) (codexproto
 	if owner, busy := s.workspaceLeases[record.WorkspaceKey]; busy && owner != record.TaskID {
 		return codexprotocol.TaskRecord{}, ErrWorkspaceBusy
 	}
+	acquired := false
+	if _, held := s.processLeases[record.WorkspaceKey]; !held {
+		if err := s.acquireProcessLease(record.WorkspaceKey); err != nil {
+			return codexprotocol.TaskRecord{}, err
+		}
+		acquired = true
+	}
 	next := record
 	next.Mutation = mutation
 	next.LeaseEpoch++
@@ -144,6 +166,9 @@ func (s *TaskStore) PrepareFollowUp(mutation codexprotocol.Mutation) (codexproto
 	next.LastEventSeq = event.Seq
 	entry := journalEntry{Kind: "mutate", RequestID: mutation.RequestID, MutationHash: hash, Record: next, Event: &event}
 	if err := s.journal.Append(entry); err != nil {
+		if acquired {
+			s.releaseProcessLease(record.WorkspaceKey)
+		}
 		return codexprotocol.TaskRecord{}, err
 	}
 	s.apply(entry)
@@ -196,6 +221,10 @@ func (s *TaskStore) AcceptAt(request codexprotocol.TaskRequest, canonicalWorkspa
 	if len(s.workspaceLeases) >= capacity {
 		return codexprotocol.TaskRecord{}, false, ErrCapacity
 	}
+	lease, err := acquireWorkspaceProcessLease(workspaceKey)
+	if err != nil {
+		return codexprotocol.TaskRecord{}, false, err
+	}
 	now := time.Now().UTC()
 	record := codexprotocol.TaskRecord{
 		Mutation:                    request.Mutation,
@@ -214,8 +243,10 @@ func (s *TaskStore) AcceptAt(request codexprotocol.TaskRequest, canonicalWorkspa
 		Record:      record,
 	}
 	if err := s.journal.Append(entry); err != nil {
+		_ = releaseWorkspaceProcessLease(lease)
 		return codexprotocol.TaskRecord{}, false, err
 	}
+	s.processLeases[workspaceKey] = lease
 	s.apply(entry)
 	return record, false, nil
 }
@@ -297,6 +328,9 @@ func (s *TaskStore) MutateEvent(mutation codexprotocol.Mutation, kind string, me
 		return err
 	}
 	s.apply(entry)
+	if _, held := s.workspaceLeases[next.WorkspaceKey]; !held {
+		s.releaseProcessLease(next.WorkspaceKey)
+	}
 	return nil
 }
 
@@ -342,11 +376,43 @@ func (s *TaskStore) FenceAndRelease(mutation codexprotocol.Mutation) error {
 		return err
 	}
 	s.apply(entry)
+	s.releaseProcessLease(record.WorkspaceKey)
 	return nil
 }
 
 func (s *TaskStore) Close() error {
+	s.mu.Lock()
+	s.releaseAllProcessLeases()
+	s.mu.Unlock()
 	return s.journal.Close()
+}
+
+func (s *TaskStore) acquireProcessLease(workspaceKey string) error {
+	if _, exists := s.processLeases[workspaceKey]; exists {
+		return nil
+	}
+	lease, err := acquireWorkspaceProcessLease(workspaceKey)
+	if err != nil {
+		return err
+	}
+	s.processLeases[workspaceKey] = lease
+	return nil
+}
+
+func (s *TaskStore) releaseProcessLease(workspaceKey string) {
+	lease, exists := s.processLeases[workspaceKey]
+	if !exists {
+		return
+	}
+	delete(s.processLeases, workspaceKey)
+	_ = releaseWorkspaceProcessLease(lease)
+}
+
+func (s *TaskStore) releaseAllProcessLeases() {
+	for key, lease := range s.processLeases {
+		_ = releaseWorkspaceProcessLease(lease)
+		delete(s.processLeases, key)
+	}
 }
 
 func (s *TaskStore) apply(entry journalEntry) {

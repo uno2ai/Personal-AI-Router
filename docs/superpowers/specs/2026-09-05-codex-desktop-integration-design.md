@@ -1,13 +1,14 @@
 # Codex Desktop Integration Design
 
-**Status:** Implementation in progress; local native delegation, live discovery, and macOS arm64 packaged Electron startup are wired and verified; Main Codex and platform release gates remain
+**Status:** macOS arm64 implementation and local acceptance complete; signed/notarized distribution and Windows/Linux native validation are not claimed
 **Date:** 2026-09-05  
 **Parent design:** [Codex Supervisor Pair Control Plane](2026-09-04-codex-supervisor-pair-control-plane.md)
 
 **Last review:** Astra max adversarial review of the desktop integration design.
-The top-level process ownership split remains viable, but implementation is
-intentionally blocked until the contracts and security gates recorded below are
-closed.
+The top-level process ownership split was retained. Its implementation-blocking
+contracts and macOS security gates are now closed by the tests and native
+acceptance evidence recorded below; signing/notarization and excluded-platform
+release validation remain separate distribution gates.
 
 ## 1. Decision summary
 
@@ -104,14 +105,25 @@ projection, live pinned remote discovery with revocation removal, connected vs
 waiting Main registration state, and scoped Codex installer behavior. A native
 local Worker→Supervisor MCP smoke test now covers a real installed Codex CLI
 through a completed read-only handoff. A macOS arm64 Electron package was also
-built and launched from its packaged app directory: the package contained both
-Codex binaries, the packaged broker started, and the broker resolved the
-packaged Worker path. Separately, the installed Main Codex CLI launched that
-packaged Supervisor and completed `workers.list` against a managed native
-Worker. The remaining release gates are the combined Electron-owned enabled
-Worker plus Main-Codex session, measured platform-matrix revocation and
-cleanup, and upgrade/uninstall oracles; those are not claimed by unit,
-cross-compilation, or a raw MCP-client smoke alone.
+built and launched from its packaged app directory with a temporary, symlink-
+checked userData root. The package contains both Codex binaries, the broker owns
+the configured Worker, and the installed Main Codex CLI launches the packaged
+Supervisor and completes `workers.list` against that Electron-owned Worker.
+The same macOS native test rotates the Worker boot epoch across Desktop restart,
+proves the running Supervisor reconnects, and proves an independently managed
+Worker survives both shutdowns. The Worker integration suite measures active
+mTLS revocation below five seconds. A kernel-backed, canonical-workspace lease
+also now excludes different Worker processes even when they use different
+journals and different `TMPDIR` values. Worker app-server children receive a
+state-root-scoped Codex home containing protected authentication state but no
+Main configuration; after initialization, the Worker reads the effective
+configuration for the task workspace and refuses to start or resume a thread
+when an active layer contains MCP servers. The final Astra max follow-up marked
+these two findings resolved and the macOS slice ready to commit. A managed
+Supervisor uses its owning Main process ID as the durable task-index namespace:
+different Main processes do not contend, while a restarted Supervisor child of
+the same Main replays the same intent. Native Windows/Linux release execution is
+not claimed by this macOS checkpoint.
 
 ## 3. Goals
 
@@ -641,16 +653,28 @@ necessary but not sufficient:
       and release gates.
 - [x] Local runtime descriptor, endpoint credential generation, and transport
       contract.
-- [ ] Supported Main client/config/reload contract and multi-instance registry.
-- [ ] Worker child isolation, owner binding, pre-dispatch recovery, process
-      cleanup proof, and cross-process workspace fencing.
+- [x] Supported Main client/config/reload contract and multi-instance registry;
+      concurrent Main processes use owner-PID-scoped task indexes and
+      management endpoints under the shared installation state root, and a
+      restarted Supervisor child reopens its owning Main's durable index.
+- [x] Worker child isolation, owner binding, pre-dispatch recovery, active
+      descendant process-group cleanup, and cross-process canonical-workspace
+      fencing.
 - [x] Broker managed-control protocol and dynamic discovery/revocation contract.
 - [x] Exact renderer origin/frame/schema enforcement and typed IPC implementation.
-- [ ] Scoped installer/update/uninstall behavior and non-empty packaged native
-      acceptance suites.
+- [ ] Cross-platform Windows/Linux installer/update/uninstall execution and
+      packaged native acceptance (excluded from this macOS checkpoint).
+- [x] macOS package/uninstaller scope oracles and non-empty packaged native
+      acceptance preserve independently managed Worker processes and user data.
 - [x] macOS arm64 package contains the Codex binaries and starts the packaged
       Electron broker with the packaged Worker path.
 - [x] Installed Main Codex CLI can launch the packaged Supervisor and complete
       a read-only `workers.list` call against a managed Worker.
+- [x] On macOS, installed Main Codex reaches the Electron-owned packaged Worker;
+      Desktop restart rotates the boot epoch without losing Supervisor
+      convergence, and an independent Worker survives shutdown/restart.
+- [x] On macOS, active mTLS revocation is measured below five seconds and two
+      Worker processes with different journals cannot lease one canonical
+      workspace concurrently.
 - [ ] User review of this written design.
 - [x] Implementation plan and code changes.

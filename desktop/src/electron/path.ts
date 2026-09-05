@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { app } from 'electron'
-import { platform } from 'os'
+import { platform, tmpdir } from 'os'
 import path from 'path'
 import { currentPlatform } from '@/shared/utils/platform'
 import {
@@ -12,6 +12,7 @@ import {
     APP_PREVIOUS_ORG
 } from '@/shared/constants/app'
 import { migrateAppDataDirectory } from '@/electron/app-data-migration'
+import { resolveCodexE2EUserData } from '@/electron/e2e-user-data'
 
 export interface PathProvider {
     getUserData(): string
@@ -20,15 +21,25 @@ export interface PathProvider {
     getAppName(): string
 }
 
+const E2E_APP_DIR = resolveCodexE2EUserData(
+    process.env['PAIR_RUN_CODEX_E2E'] === '1',
+    process.env['PAIR_CODEX_E2E_USER_DATA'],
+    tmpdir()
+)
 const BASE_ROOT =
     platform() === 'win32'
         ? (process.env.LOCALAPPDATA ?? app.getPath('appData').replace('Roaming', 'Local'))
         : currentPlatform() === 'linux'
           ? (process.env.XDG_CONFIG_HOME ?? app.getPath('appData'))
           : path.join(app.getPath('home'), 'Library', 'Application Support')
-const ROOT = path.join(BASE_ROOT, APP_ORG)
-const PREVIOUS_ROOT = path.join(BASE_ROOT, APP_PREVIOUS_ORG)
-const APP_DIR = path.join(ROOT, APP_DATA_DIR_NAME)
+const ROOT = E2E_APP_DIR ? path.dirname(E2E_APP_DIR) : path.join(BASE_ROOT, APP_ORG)
+const PREVIOUS_ROOT = E2E_APP_DIR
+    ? path.join(ROOT, '.previous-pair-user-data')
+    : path.join(BASE_ROOT, APP_PREVIOUS_ORG)
+const APP_DIR = E2E_APP_DIR ?? path.join(ROOT, APP_DATA_DIR_NAME)
+
+/** True only for the explicitly gated, tmp-rooted packaged Codex acceptance run. */
+export const isCodexPackagedE2E = (): boolean => E2E_APP_DIR !== null
 
 /**
  * The generated `nvpair` launcher directory (see `src/electron/nvpair-command.ts`)

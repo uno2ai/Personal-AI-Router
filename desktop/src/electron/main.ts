@@ -17,7 +17,7 @@ import {
 } from '@/electron/config/ui-config'
 import { currentPlatform } from '@/shared/utils/platform'
 import { APP_DISPLAY_NAME, APP_EXIT_ARGUMENT, APP_ID } from '@/shared/constants/app'
-import { migrateAppData } from '@/electron/path'
+import { isCodexPackagedE2E, migrateAppData } from '@/electron/path'
 import { macPrivilege } from '@/electron/services/mac-privilege-service'
 
 import { registerAllIpc } from '@/electron/ipc'
@@ -133,12 +133,12 @@ if (!gotTheLock || exitRequested) {
 
         // Make `nvpair` reachable from any terminal by generating a launcher for
         // the bundled terminal UI.
-        ensureNvpairOnPath()
+        if (!isCodexPackagedE2E()) ensureNvpairOnPath()
 
         createOverviewWindow()
         initTray()
 
-        void runMacPrivilegedSetup()
+        if (!isCodexPackagedE2E()) void runMacPrivilegedSetup()
     })
 
     // Keep app alive in tray -- don't quit when all windows are closed

@@ -173,7 +173,7 @@ func TestMain(m *testing.M) {
 }
 
 func goBuild(srcDir, output string) error {
-	cmd := exec.Command("go", "build", "-o", output, ".")
+	cmd := exec.Command("go", "build", "-buildvcs=false", "-o", output, ".")
 	cmd.Dir = srcDir
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr

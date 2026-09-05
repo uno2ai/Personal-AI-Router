@@ -45,7 +45,14 @@ func main() {
 	if resolvedStateRoot == "" {
 		resolvedStateRoot = defaultSupervisorStateRoot()
 	}
-	index, err := OpenTaskIndex(filepath.Join(resolvedStateRoot, "dispatch-index.jsonl"))
+	managedMainSession := *managementSocketDir != ""
+	// Main is the lifecycle owner of an MCP stdio Supervisor. Its PID remains
+	// stable if it restarts the child, so it provides both per-Main isolation
+	// and a durable namespace for replaying that session's dispatch intent.
+	// The Supervisor's own PID must not be used here: it changes on restart and
+	// would strand or delete the recovery journal.
+	indexPath := supervisorTaskIndexPath(resolvedStateRoot, managedMainSession, os.Getppid())
+	index, err := OpenTaskIndex(indexPath)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -70,6 +77,13 @@ func main() {
 	if err := server.Serve(os.Stdin, os.Stdout); err != nil {
 		log.Printf("Supervisor stopped: %v", err)
 	}
+}
+
+func supervisorTaskIndexPath(stateRoot string, managedMainSession bool, mainPID int) string {
+	if managedMainSession {
+		return filepath.Join(stateRoot, fmt.Sprintf("dispatch-index-main-%d.jsonl", mainPID))
+	}
+	return filepath.Join(stateRoot, "dispatch-index.jsonl")
 }
 
 func defaultSupervisorStateRoot() string {

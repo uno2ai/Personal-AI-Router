@@ -98,6 +98,7 @@ func main() {
 
 	var worker *workerHTTPServer
 	var mesh *clustertrust.Mesh
+	appServers := NewAppServerFactory(*codexBin, root)
 	if *clusterDir != "" {
 		mesh = clustertrust.Open(*clusterDir)
 		var principals []string
@@ -106,9 +107,9 @@ func main() {
 				principals = append(principals, value)
 			}
 		}
-		worker = NewServerWithSecurity(store, NewAppServerFactory(*codexBin), policy, artifacts, *maxConcurrency, mesh, principals)
+		worker = NewServerWithSecurity(store, appServers, policy, artifacts, *maxConcurrency, mesh, principals)
 	} else {
-		worker = NewServerWithArtifacts(store, NewAppServerFactory(*codexBin), policy, artifacts, *maxConcurrency, *authToken).(*workerHTTPServer)
+		worker = NewServerWithArtifacts(store, appServers, policy, artifacts, *maxConcurrency, *authToken).(*workerHTTPServer)
 	}
 	worker.toolLabels = commaSeparated(*toolLabels)
 	httpServer := &http.Server{Handler: worker}

@@ -22,17 +22,28 @@
 - Every production code change follows a red test, expected failure, minimal green implementation, and full affected-suite verification before refactoring.
 - No implementation task is considered complete without a named test command and captured exit status.
 
-**Execution checkpoint:** Tasks 1–4 and the local portions of Tasks 5–6 are
+**Execution checkpoint:** Tasks 1–5 and Task 6's packaged native implementation are
 implemented on `main` without a fork or push. The native local Worker→Supervisor
 smoke now delegates a real read-only task through the installed Codex CLI;
 live remote discovery and Main registration activation state are also wired.
-The macOS arm64 Electron package now builds and launches in an isolated HOME;
+The macOS arm64 Electron package now builds and launches with a symlink-safe,
+temporary userData root;
 the packaged broker reaches `app:ready` and receives the packaged Codex Worker
-path. The installed Main Codex CLI also launched the packaged Supervisor and
-completed a read-only `workers.list` call against a managed Worker. A combined
-Electron-owned enabled Worker plus Main Codex session, platform-matrix
-revocation and cleanup measurements, and upgrade/uninstall oracles remain
-explicitly open.
+path. The installed Main Codex CLI launches the packaged Supervisor against that
+Electron-owned Worker and completes a read-only `workers.list` call. The macOS
+suite also proves Worker boot-epoch rotation across Desktop restart, dynamic
+Supervisor reconnection, and survival of a separately managed Worker process.
+The mTLS active-task test measures revocation below five seconds, and a real
+two-process test now fences the same canonical workspace across different
+Worker journals even when their `TMPDIR` values differ. Worker app-server
+children use a state-root-scoped Codex home that copies protected authentication
+state but not Main configuration, and they reject active MCP configuration
+before starting or resuming a thread. Managed Supervisor journals are keyed by
+their owning Main process, so concurrent Main processes remain isolated while a
+Supervisor child restart reopens the same durable intent. The final Astra max
+follow-up marked both security findings resolved and the macOS slice ready to
+commit. Windows/Linux native release execution remains out of scope for this
+checkpoint.
 
 ---
 
@@ -323,22 +334,24 @@ explicitly open.
   drain/restart coordination, installation-owned cleanup, and platform-specific
   executable/state ACL checks.
 
-- [ ] **Step 4: Implement the non-empty packaged native suite.**
+- [x] **Step 4: Implement the non-empty packaged native suite.**
 
   The local native Worker/Supervisor portion is implemented and runs as the
   opt-in `codex-desktop.e2e.test.ts` suite. The macOS arm64 package build and
   isolated packaged Electron startup smoke are also verified. An installed
-  Main Codex CLI has launched the packaged Supervisor and completed
-  `workers.list`; the full step remains open until that client is combined
-  with the Electron-owned enabled Worker, plus restart, revocation, and
-  independent Worker coexistence assertions.
+  Main Codex CLI launches the packaged Supervisor and completes `workers.list`
+  against the Electron-owned enabled Worker. The suite restarts Desktop and
+  observes a newer Worker boot epoch through the already-running Supervisor,
+  while an independently managed Worker remains alive. Remote mTLS revocation
+  is measured by the Worker integration suite and cross-process workspace
+  exclusion is exercised with separate journals.
 
   Start the built broker/Worker/Supervisor on the supported host, use the real
   Main Codex MCP client contract, run a bounded read-only task, revoke trust,
   verify cancellation and cleanup state, restart all owners, and confirm no
   duplicate task or unrelated process is touched.
 
-- [ ] **Step 5: Run release verification and commit.**
+- [x] **Step 5: Run release verification and commit.**
 
   Run the complete Go suites, `npm run test:unit -- --run`, `npm run typecheck`,
   `npm run service-contracts:check`, platform packaging checks, and the named
@@ -346,8 +359,35 @@ explicitly open.
 
 ## Completion checklist
 
-- [ ] All six tasks have red-green test evidence and commits.
-- [ ] All seven implementation gates in the design document are backed by an executable test or a documented platform oracle.
-- [ ] The design document checklist is updated to show only verified items.
-- [ ] `git diff --check`, full tests, typechecks, package manifest verification, and native acceptance all pass on the claimed platform.
-- [ ] No push or merge is performed without an explicit user request.
+- [x] All six tasks have red-green test evidence and commits.
+- [x] All seven implementation gates in the design document are backed by an executable test or a documented macOS platform oracle.
+- [x] The design document checklist is updated to show only verified items.
+- [x] `git diff --check`, full tests, typechecks, package manifest verification, and native acceptance all pass on the claimed macOS arm64 platform.
+- [x] No push or merge is performed without an explicit user request.
+
+The generated macOS artifact is unsigned. Apple Developer signing,
+notarization, and a Gatekeeper install/upgrade/uninstall run from the signed DMG
+remain external distribution gates requiring release credentials. Windows and
+Linux native validation are excluded by the current implementation scope.
+
+### Final macOS verification evidence
+
+- Desktop unit suite: 44 files and 230 tests passed; node, web, and test
+  TypeScript checks passed; service-contract verification passed; ESLint
+  completed with 0 errors (65 pre-existing formatting warnings).
+- All 18 service Go modules passed `go test ./...`; the Worker and Supervisor
+  modules separately passed `go test -race ./...`.
+- The active mTLS revocation test reached terminal cancellation in
+  3.874 seconds, below the five-second gate.
+- The macOS arm64 package rebuilt all 15 modular binaries and produced
+  `NVPAIR-Setup-0.1.1-arm64.zip`, `NVPAIR-Setup-0.1.1-arm64.dmg`, and the
+  packaged `PAIR.app`.
+- The final packaged native suite passed all 3 tests in 48.67 seconds. It ran a
+  real read-only Worker task and used installed Codex CLI 0.153.2 with
+  `gpt-5.6-sol` at max reasoning to call the packaged Supervisor; Main returned
+  `PACKAGED_ELECTRON_MAIN_CODEX_OK`. Desktop restart/reconvergence and
+  independent-Worker survival also passed.
+- Astra max found two Important issues during final review (recursive MCP config
+  inheritance and `TMPDIR`-split workspace locks). Both received red tests,
+  fixes, green race/native verification, and a follow-up `Resolved` / ready to
+  commit verdict.

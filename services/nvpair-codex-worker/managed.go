@@ -285,7 +285,8 @@ func startManagedWorker(config managedWorkerConfig) (*managedWorkerController, e
 	}
 	probeContext, cancelProbe := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancelProbe()
-	if err := NewAppServerFactory(config.CodexBin).Probe(probeContext, config.WorkspaceRoot); err != nil {
+	appServers := NewAppServerFactory(config.CodexBin, config.StateRoot)
+	if err := appServers.Probe(probeContext, config.WorkspaceRoot); err != nil {
 		writeManagedUnavailableDescriptor(config, err)
 		return nil, fmt.Errorf("app-server readiness probe: %w", err)
 	}
@@ -307,7 +308,7 @@ func startManagedWorker(config managedWorkerConfig) (*managedWorkerController, e
 		_ = store.Close()
 		return nil, fmt.Errorf("prune artifacts: %w", err)
 	}
-	worker := NewServerWithArtifacts(store, NewAppServerFactory(config.CodexBin), policy, artifacts, config.MaxConcurrency, config.AuthToken).(*workerHTTPServer)
+	worker := NewServerWithArtifacts(store, appServers, policy, artifacts, config.MaxConcurrency, config.AuthToken).(*workerHTTPServer)
 	worker.policyCeiling = config.PolicyCeiling
 	worker.toolLabels = append([]string(nil), config.ToolLabels...)
 	certificate, fingerprint, err := localServerCertificate()

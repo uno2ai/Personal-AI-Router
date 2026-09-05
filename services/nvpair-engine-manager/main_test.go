@@ -30,12 +30,12 @@ func TestMain(m *testing.M) {
 	}
 
 	fakeEngineBin = filepath.Join(tmp, "fake-engine"+suffix)
-	if out, err := exec.Command("go", "build", "-o", fakeEngineBin, "./testdata/fakeengine").CombinedOutput(); err != nil {
+	if out, err := exec.Command("go", "build", "-buildvcs=false", "-o", fakeEngineBin, "./testdata/fakeengine").CombinedOutput(); err != nil {
 		panic("build fake-engine: " + err.Error() + "\n" + string(out))
 	}
 
 	managerBin = filepath.Join(tmp, "nvpair-engine-manager"+suffix)
-	if out, err := exec.Command("go", "build", "-o", managerBin, ".").CombinedOutput(); err != nil {
+	if out, err := exec.Command("go", "build", "-buildvcs=false", "-o", managerBin, ".").CombinedOutput(); err != nil {
 		panic("build engine-manager: " + err.Error() + "\n" + string(out))
 	}
 

@@ -7,8 +7,10 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -57,6 +59,19 @@ func runFakeAppServer() int {
 		}
 		if method == "initialized" {
 			initialized = true
+			continue
+		}
+		if method == "config/read" {
+			config := map[string]any{}
+			if os.Getenv("CODEX_FAKE_MCP_CONFIG") == "1" {
+				config["mcp_servers"] = map[string]any{"pair-codex-supervisor": map[string]any{"command": "supervisor"}}
+			}
+			result := map[string]any{
+				"config":  map[string]any{},
+				"origins": map[string]any{},
+				"layers":  []map[string]any{{"config": config, "name": "user", "version": "fixture"}},
+			}
+			_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(message["id"]), "result": result})
 			continue
 		}
 		if method == "thread/start" || method == "thread/resume" {
@@ -203,6 +218,84 @@ func TestAppServerProbeNegotiatesCompatibilityAndCleansUp(t *testing.T) {
 	if log := readFixtureLog(t, logPath); !strings.Contains(log, "initialize") || !strings.Contains(log, "initialized") {
 		t.Fatalf("probe did not complete native handshake: %s", log)
 	}
+}
+
+func TestWorkerChildDisablesMainMCPPluginsAndHooks(t *testing.T) {
+	args := strings.Join(appServerArguments(), " ")
+	for _, required := range []string{
+		"--disable plugins",
+		"--disable hooks",
+		"--disable apps",
+		"--disable enable_mcp_apps",
+		"--disable skill_mcp_dependency_install",
+	} {
+		if !strings.Contains(args, required) {
+			t.Fatalf("app-server child args %q do not contain %q", args, required)
+		}
+	}
+}
+
+func TestWorkerChildRejectsEffectiveMCPConfigurationBeforeStartingThread(t *testing.T) {
+	logPath := t.TempDir() + "/mcp-config.log"
+	t.Setenv("CODEX_FAKE_APP_SERVER", "1")
+	t.Setenv("CODEX_FAKE_MCP_CONFIG", "1")
+	t.Setenv("CODEX_FAKE_LOG", logPath)
+	_, err := NewAppServerFactory(buildFakeAppServer(t)).New().Run(
+		context.Background(),
+		validTaskRequest("r-mcp", "t-mcp", "a-mcp", 1),
+		func(codexprotocol.TaskEvent) {},
+	)
+	if err == nil || !strings.Contains(err.Error(), "MCP configuration") {
+		t.Fatalf("expected inherited MCP configuration to fail closed, got %v", err)
+	}
+	log := readFixtureLog(t, logPath)
+	if strings.Contains(log, "thread/start") {
+		t.Fatalf("thread started before MCP isolation was verified: %s", log)
+	}
+}
+
+func TestWorkerChildUsesIsolatedCodexHomeWithoutCopyingUserConfiguration(t *testing.T) {
+	userHome := t.TempDir()
+	stateRoot := t.TempDir()
+	t.Setenv("CODEX_HOME", userHome)
+	if err := os.WriteFile(filepath.Join(userHome, "auth.json"), []byte(`{"token":"fixture"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(userHome, "config.toml"), []byte("[mcp_servers.main]\ncommand = 'supervisor'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command, err := NewAppServerFactory("codex", stateRoot).command()
+	if err != nil {
+		t.Fatal(err)
+	}
+	isolatedHome := filepath.Join(stateRoot, "child-codex-home")
+	if value := environmentValue(command.Env, "CODEX_HOME"); value != isolatedHome {
+		t.Fatalf("CODEX_HOME=%q, want %q", value, isolatedHome)
+	}
+	if _, err := os.Stat(filepath.Join(isolatedHome, "config.toml")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("user configuration was copied into isolated home: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(isolatedHome, "auth.json"))
+	if err != nil || string(data) != `{"token":"fixture"}` {
+		t.Fatalf("isolated authentication=%q err=%v", data, err)
+	}
+	info, err := os.Stat(filepath.Join(isolatedHome, "auth.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		t.Fatalf("isolated authentication permissions are too broad: %o", info.Mode().Perm())
+	}
+}
+
+func environmentValue(environment []string, key string) string {
+	prefix := key + "="
+	for _, entry := range environment {
+		if strings.HasPrefix(entry, prefix) {
+			return strings.TrimPrefix(entry, prefix)
+		}
+	}
+	return ""
 }
 
 func TestAppServerProbeRejectsUnsupportedInitializeResponse(t *testing.T) {

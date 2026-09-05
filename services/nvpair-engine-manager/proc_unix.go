@@ -97,15 +97,23 @@ func ssPID(port int) (int, bool) {
 	return 0, false
 }
 
-// procImage resolves a PID's executable path via /proc (Linux). macOS has no
-// /proc, so it returns "" there and the image check is skipped — reclamation
-// on macOS relies on the caller declining when the image can't be confirmed.
+// procImage resolves a PID's executable path via /proc (Linux), then through
+// ps's command-name column on macOS. Both paths remain fail-closed: an empty,
+// relative, or unresolvable answer cannot match a managed absolute image.
 func procImage(pid int) string {
 	if pid <= 0 {
 		return ""
 	}
 	if path, err := os.Readlink("/proc/" + strconv.Itoa(pid) + "/exe"); err == nil {
 		return path
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), portLookupTimeout)
+	defer cancel()
+	if out, err := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output(); err == nil {
+		path := strings.TrimSpace(string(out))
+		if strings.HasPrefix(path, "/") {
+			return path
+		}
 	}
 	return ""
 }
