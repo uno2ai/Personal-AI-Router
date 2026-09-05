@@ -118,8 +118,9 @@ FunctionEnd
   nsExec::ExecToLog 'taskkill /F /IM "nvpair-node-settings.exe"'
   nsExec::ExecToLog 'taskkill /F /IM "nvpair-cluster-manager.exe"'
   nsExec::ExecToLog 'taskkill /F /IM "nvpair-job-scheduler.exe"'
-  nsExec::ExecToLog 'taskkill /F /IM "nvpair-codex-worker.exe"'
-  nsExec::ExecToLog 'taskkill /F /IM "nvpair-codex-supervisor.exe"'
+  ; Codex Desktop owns its broker-managed Worker lifecycle and the Main Codex
+  ; client owns its Supervisor process. Never kill a separately configured
+  ; Codex process by image name during installation.
   nsExec::ExecToLog 'taskkill /F /IM "nvpair-ui-broker.exe"'
   nsExec::ExecToLog 'taskkill /F /IM "nvpair-tui.exe"'
   ; Give Windows a moment to release the handles.
@@ -238,7 +239,6 @@ Section "Install"
 
   nsExec::ExecToLog 'netsh advfirewall firewall add rule name="NVPAIR Node Info" dir=in action=allow program="$INSTDIR\bin\nvpair-node-info.exe" enable=yes profile=any remoteip=localsubnet'
   nsExec::ExecToLog 'netsh advfirewall firewall add rule name="NVPAIR Node Scanner" dir=in action=allow program="$INSTDIR\bin\nvpair-node-scanner.exe" enable=yes profile=any remoteip=localsubnet'
-  nsExec::ExecToLog 'netsh advfirewall firewall add rule name="NVPAIR Codex Worker (mTLS 14324)" dir=in action=allow protocol=TCP localport=14324 program="$INSTDIR\bin\nvpair-codex-worker.exe" enable=yes profile=any remoteip=localsubnet'
 
   ; mDNS needs UDP 5353 inbound
   nsExec::ExecToLog 'netsh advfirewall firewall add rule name="NVPAIR mDNS (UDP 5353)" dir=in action=allow protocol=UDP localport=5353 program="$INSTDIR\bin\ollama-proxy.exe" enable=yes profile=any remoteip=localsubnet'
@@ -294,7 +294,8 @@ Section "Uninstall"
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="NVPAIR mDNS Cluster Manager (UDP 5353)"'
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="NVPAIR Engine Manager (TCP 14322)"'
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="NVPAIR Engine Manager Control (TCP 14323)"'
-  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="NVPAIR Codex Worker (mTLS 14324)"'
+  ; The Desktop-managed Worker uses authenticated loopback TLS on an ephemeral
+  ; port and does not own an installer-wide firewall rule.
 
   ; Remove files
   Delete "$INSTDIR\bin\ollama-proxy.exe"

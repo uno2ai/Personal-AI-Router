@@ -69,6 +69,7 @@ type taskIndexEntry struct {
 type TaskIndex struct {
 	mu       sync.Mutex
 	file     *os.File
+	lock     *taskIndexLock
 	path     string
 	sequence uint64
 	intents  map[string]TaskIntent
@@ -82,16 +83,22 @@ func OpenTaskIndex(path string) (*TaskIndex, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("create task index directory: %w", err)
 	}
+	lock, err := acquireTaskIndexLock(path)
+	if err != nil {
+		return nil, err
+	}
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
+		_ = releaseTaskIndexLock(lock)
 		return nil, fmt.Errorf("open task index: %w", err)
 	}
 	entries, err := readTaskIndex(path)
 	if err != nil {
 		_ = file.Close()
+		_ = releaseTaskIndexLock(lock)
 		return nil, err
 	}
-	index := &TaskIndex{file: file, path: path, intents: make(map[string]TaskIntent)}
+	index := &TaskIndex{file: file, lock: lock, path: path, intents: make(map[string]TaskIntent)}
 	for _, entry := range entries {
 		if entry.Sequence > index.sequence {
 			index.sequence = entry.Sequence
@@ -237,7 +244,11 @@ func (i *TaskIndex) Close() error {
 		return nil
 	}
 	i.closed = true
-	return i.file.Close()
+	err := i.file.Close()
+	if lockErr := releaseTaskIndexLock(i.lock); err == nil {
+		err = lockErr
+	}
+	return err
 }
 
 func readTaskIndex(path string) ([]taskIndexEntry, error) {

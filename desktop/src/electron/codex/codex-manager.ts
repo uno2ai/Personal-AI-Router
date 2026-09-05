@@ -171,32 +171,33 @@ export class CodexManager {
 
     private workerState(config: CodexConfig): CodexWorkerStateSnapshot {
         if (!config.enabled) {
-            return { state: 'disabled', enabled: false, endpoint: null, workerInstanceId: null, bootEpoch: null, policyRevision: config.policyRevision }
+            return { state: 'disabled', enabled: false, policyCeiling: config.policyCeiling, endpoint: null, workerInstanceId: null, bootEpoch: null, policyRevision: config.policyRevision }
         }
         if (!config.workspaceRoot || !config.stateRoot || !config.codexExecutable) {
-            return { state: 'setup_required', enabled: true, endpoint: null, workerInstanceId: config.workerInstanceId, bootEpoch: null, policyRevision: config.policyRevision }
+            return { state: 'setup_required', enabled: true, policyCeiling: config.policyCeiling, endpoint: null, workerInstanceId: config.workerInstanceId, bootEpoch: null, policyRevision: config.policyRevision }
         }
         const descriptorPath = codexRuntimeDescriptorPath(this.userDataRoot)
         if (!fs.existsSync(descriptorPath)) {
-            return { state: 'starting', enabled: true, endpoint: null, workerInstanceId: config.workerInstanceId, bootEpoch: null, policyRevision: config.policyRevision }
+            return { state: 'starting', enabled: true, policyCeiling: config.policyCeiling, endpoint: null, workerInstanceId: config.workerInstanceId, bootEpoch: null, policyRevision: config.policyRevision }
         }
         try {
             const descriptor = JSON.parse(fs.readFileSync(descriptorPath, 'utf8')) as Record<string, unknown>
             const expiresAt = typeof descriptor.expiresAt === 'string' ? Date.parse(descriptor.expiresAt) : 0
             if (!expiresAt || expiresAt <= Date.now()) {
-                return { state: 'failed', enabled: true, endpoint: null, workerInstanceId: config.workerInstanceId, bootEpoch: null, policyRevision: config.policyRevision, error: 'Worker runtime descriptor is expired' }
+                return { state: 'failed', enabled: true, policyCeiling: config.policyCeiling, endpoint: null, workerInstanceId: config.workerInstanceId, bootEpoch: null, policyRevision: config.policyRevision, error: 'Worker runtime descriptor is expired' }
             }
             const state = descriptor.state === 'busy' ? 'busy' : descriptor.state === 'ready' ? 'ready' : 'starting'
             return {
                 state,
                 enabled: true,
+                policyCeiling: config.policyCeiling,
                 endpoint: typeof descriptor.endpoint === 'string' ? descriptor.endpoint : null,
                 workerInstanceId: typeof descriptor.workerInstanceId === 'string' ? descriptor.workerInstanceId : config.workerInstanceId,
                 bootEpoch: typeof descriptor.bootEpoch === 'number' ? descriptor.bootEpoch : null,
                 policyRevision: config.policyRevision
             }
         } catch (error) {
-            return { state: 'failed', enabled: true, endpoint: null, workerInstanceId: config.workerInstanceId, bootEpoch: null, policyRevision: config.policyRevision, error: error instanceof Error ? error.message : String(error) }
+            return { state: 'failed', enabled: true, policyCeiling: config.policyCeiling, endpoint: null, workerInstanceId: config.workerInstanceId, bootEpoch: null, policyRevision: config.policyRevision, error: error instanceof Error ? error.message : String(error) }
         }
     }
 

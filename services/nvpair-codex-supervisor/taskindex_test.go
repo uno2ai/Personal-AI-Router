@@ -85,3 +85,15 @@ func TestTaskIndexRejectsMismatchedRequestIdentity(t *testing.T) {
 		t.Fatal("TaskIndex accepted mismatched request identity")
 	}
 }
+
+func TestTaskIndexRejectsConcurrentOpen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "dispatch-index.jsonl")
+	first, err := OpenTaskIndex(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	if _, err := OpenTaskIndex(path); err == nil {
+		t.Fatal("second Supervisor opened the same task index")
+	}
+}

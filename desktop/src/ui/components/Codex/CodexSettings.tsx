@@ -31,6 +31,10 @@ export default function CodexSettings() {
     const worker = state?.worker
     const registration = state?.registration
 
+    useEffect(() => {
+        if (worker) setPolicyCeiling(worker.policyCeiling)
+    }, [worker])
+
     return (
         <Stack gap="6" className="relative py-8 px-3 w-full">
             <Stack gap="2">

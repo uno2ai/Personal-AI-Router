@@ -91,7 +91,7 @@ export default defineConfig({
                 extends: true,
                 test: {
                     name: 'e2e',
-                    include: [],
+                    include: ['tests/e2e/**/*.e2e.test.ts'],
                     // E2E spawns binaries; these need much longer than unit.
                     hookTimeout: 120_000,
                     testTimeout: 60_000,

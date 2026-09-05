@@ -35,6 +35,7 @@ export interface CodexConfig {
 export interface CodexWorkerStateSnapshot {
     state: CodexWorkerState
     enabled: boolean
+    policyCeiling: CodexPolicyCeiling
     endpoint: string | null
     workerInstanceId: string | null
     bootEpoch: number | null

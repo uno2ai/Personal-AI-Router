@@ -99,6 +99,7 @@ describe('Codex config defaults', () => {
         expect(manager.getState().worker.state).toBe('disabled')
         const configured = manager.configureWorker({ workspaceRoot: path.join(root, 'workspace') })
         expect(configured.worker.state).toBe('disabled')
+        expect(configured.worker.policyCeiling).toBe('read-only')
         manager.setWorkerEnabled(true)
         const workerConfig = fs.readFileSync(path.join(root, 'codex', 'worker-config.json'), 'utf8')
         expect(workerConfig).toContain('authToken')

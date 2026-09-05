@@ -12,7 +12,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	"nvpair-shared/clustertrust"
@@ -54,7 +53,7 @@ func main() {
 	server.SetTaskIndex(index)
 	managementCtx, stopManagement := context.WithCancel(context.Background())
 	defer stopManagement()
-	if *managementSocketDir != "" && runtime.GOOS != "windows" {
+	if *managementSocketDir != "" {
 		socketPath := ManagementSocketPath(*managementSocketDir, os.Getpid())
 		removeRegistry, err := WriteManagementRegistry(*managementSocketDir, socketPath, os.Getpid())
 		if err != nil {

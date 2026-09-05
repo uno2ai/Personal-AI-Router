@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"nvpair-shared/codexprotocol"
+	"nvpair-shared/ipc"
 )
 
 type managementRequest struct {
@@ -36,6 +37,9 @@ type managementRegistry struct {
 }
 
 func ManagementSocketPath(directory string, pid int) string {
+	if runtime.GOOS == "windows" {
+		return `\\.\pipe\nvpair-codex-supervisor-` + fmt.Sprintf("%d", pid)
+	}
 	short := filepath.Join(directory, fmt.Sprintf("supervisor-%d.sock", pid))
 	if len(short) < 90 {
 		return short
@@ -63,34 +67,34 @@ func WriteManagementRegistry(directory, socketPath string, pid int) (func(), err
 }
 
 func (s *MCPServer) StartManagementSocket(ctx context.Context, path string) error {
-	if runtime.GOOS == "windows" {
-		// Windows builds reserve this hook for the named-pipe implementation. The
-		// MCP stdio server remains fully functional without the optional UI
-		// management channel.
-		return nil
-	}
-	if strings.TrimSpace(path) == "" || !filepath.IsAbs(path) {
+	if strings.TrimSpace(path) == "" || (runtime.GOOS != "windows" && !filepath.IsAbs(path)) {
 		return errors.New("management socket path must be absolute")
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return fmt.Errorf("create management socket directory: %w", err)
+	if runtime.GOOS != "windows" {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return fmt.Errorf("create management socket directory: %w", err)
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove stale management socket: %w", err)
+		}
 	}
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("remove stale management socket: %w", err)
-	}
-	listener, err := net.Listen("unix", path)
+	listener, err := ipc.Listen(path)
 	if err != nil {
 		return fmt.Errorf("listen on management socket: %w", err)
 	}
-	if err := os.Chmod(path, 0o600); err != nil {
-		_ = listener.Close()
-		_ = os.Remove(path)
-		return fmt.Errorf("protect management socket: %w", err)
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(path, 0o600); err != nil {
+			_ = listener.Close()
+			_ = os.Remove(path)
+			return fmt.Errorf("protect management socket: %w", err)
+		}
 	}
 	go func() {
 		<-ctx.Done()
 		_ = listener.Close()
-		_ = os.Remove(path)
+		if runtime.GOOS != "windows" {
+			_ = os.Remove(path)
+		}
 	}()
 	go func() {
 		for {
