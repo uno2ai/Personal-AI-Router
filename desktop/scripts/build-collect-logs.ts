@@ -77,7 +77,13 @@ function main(): void {
         ['build', '-trimpath', '-ldflags', '-s -w', '-o', outFile, '.'],
         {
             cwd: MODULE_DIR,
-            env: { ...process.env, CGO_ENABLED: '0', GOOS: goos(platform), GOARCH: goarch(arch) },
+            env: {
+                ...process.env,
+                CGO_ENABLED: '0',
+                GOOS: goos(platform),
+                GOARCH: goarch(arch),
+                GOFLAGS: `${process.env.GOFLAGS ?? ''} -buildvcs=false`.trim()
+            },
             stdio: 'inherit'
         }
     )

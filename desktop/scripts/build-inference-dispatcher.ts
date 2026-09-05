@@ -261,7 +261,8 @@ function main(): void {
                 ...process.env,
                 CGO_ENABLED: '0',
                 GOOS: goos(options.platform),
-                GOARCH: goarch(options.arch)
+                GOARCH: goarch(options.arch),
+                GOFLAGS: `${process.env.GOFLAGS ?? ''} -buildvcs=false`.trim()
             },
             stdio: 'inherit'
         }

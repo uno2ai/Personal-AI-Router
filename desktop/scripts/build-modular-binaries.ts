@@ -372,7 +372,13 @@ function buildBinary(
                 ...process.env,
                 CGO_ENABLED: '0',
                 GOOS: goos(options.platform),
-                GOARCH: goarch(options.arch)
+                GOARCH: goarch(options.arch),
+                // Release worktrees can live below another VCS checkout
+                // (for example Git inside an SVN-managed workspace). The
+                // binaries do not consume Go's VCS metadata, and without
+                // disabling stamping `go build` aborts before producing the
+                // packaged runtime inventory.
+                GOFLAGS: `${process.env.GOFLAGS ?? ''} -buildvcs=false`.trim()
             },
             stdio: 'inherit'
         }
