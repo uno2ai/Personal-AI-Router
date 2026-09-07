@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"nvpair-shared/codexruntime"
+	"nvpair-shared/protectedfile"
 )
 
 func validManagedConfig(root string) managedWorkerConfig {
@@ -106,7 +107,7 @@ func TestManagedControlStartsReportsAndStopsWorker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+	if err := protectedfile.WriteFile(configPath, data); err != nil {
 		t.Fatal(err)
 	}
 
@@ -163,7 +164,7 @@ func TestManagedControlStartsReportsAndStopsWorker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+	if err := protectedfile.WriteFile(configPath, data); err != nil {
 		t.Fatal(err)
 	}
 	revisionData, err := codexruntime.MarshalControlMessage(codexruntime.ControlMessage{

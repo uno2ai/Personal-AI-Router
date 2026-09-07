@@ -13,12 +13,16 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"nvpair-shared/codexprotocol"
+	"nvpair-shared/codexruntime"
+	"nvpair-shared/protectedfile"
 )
 
 const testWorkerToken = "test-worker-token"
@@ -292,6 +296,7 @@ func startCodexWorker(t *testing.T, workspace, state string, environment ...stri
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { stopCodexProcess(cmd) })
 	waitForWorker(t, "http://127.0.0.1:"+strconv.Itoa(port))
 	return cmd, "http://127.0.0.1:" + strconv.Itoa(port), logPath
 }
@@ -311,30 +316,42 @@ func startCodexSupervisor(t *testing.T, workerURL string) (*exec.Cmd, io.WriteCl
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { stopCodexSupervisor(cmd, input) })
 	return cmd, input, bufio.NewReader(output)
 }
 
-func stopCodexSupervisor(cmd *exec.Cmd, input io.WriteCloser) {
-	_ = input.Close()
-	if cmd.Process != nil {
-		_ = cmd.Process.Kill()
-	}
-	_ = cmd.Wait()
-}
+// Cleanup is registered immediately after Start, and explicit restart cleanup
+// shares this barrier with t.Cleanup. Each exec.Cmd is waited exactly once.
+var stoppedCodexProcesses sync.Map
 
+func stopCodexSupervisor(cmd *exec.Cmd, input io.WriteCloser) {
+	stopCodexOwnedProcess(cmd, func() { _ = input.Close() })
+}
 func stopCodexProcess(cmd *exec.Cmd) {
+	stopCodexOwnedProcess(cmd, func() {
+		if runtime.GOOS == "windows" {
+			_ = cmd.Process.Kill()
+		} else {
+			_ = cmd.Process.Signal(os.Interrupt)
+		}
+	})
+}
+func stopCodexOwnedProcess(cmd *exec.Cmd, requestStop func()) {
 	if cmd.Process == nil {
 		return
 	}
-	_ = cmd.Process.Signal(os.Interrupt)
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		_ = cmd.Process.Kill()
-		<-done
-	}
+	onceValue, _ := stoppedCodexProcesses.LoadOrStore(cmd, &sync.Once{})
+	onceValue.(*sync.Once).Do(func() {
+		requestStop()
+		done := make(chan error, 1)
+		go func() { done <- cmd.Wait() }()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			_ = cmd.Process.Kill()
+			<-done
+		}
+	})
 }
 
 func callSupervisor(t *testing.T, input io.Writer, responses *bufio.Reader, id int, method string, params any) json.RawMessage {
@@ -508,4 +525,71 @@ func freeCodexPort(t *testing.T) int {
 	}
 	defer listener.Close()
 	return listener.Addr().(*net.TCPAddr).Port
+}
+
+func TestManagedWorkerRestartPreservesIndependentWorker(t *testing.T) {
+	independent, independentURL, _ := startCodexWorker(t, t.TempDir(), t.TempDir())
+	defer stopCodexProcess(independent)
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.json")
+	config := map[string]any{
+		"schemaVersion": 1, "installationId": "fixture-installation", "workerInstanceId": "fixture-worker",
+		"bootEpoch": 1, "generation": 1, "workspaceRoot": filepath.Join(root, "workspace"), "stateRoot": filepath.Join(root, "state"),
+		"account": "fixture", "codexBin": fakeCodexBin, "maxConcurrency": 1, "authToken": testWorkerToken,
+		"runtimeDescriptorPath": filepath.Join(root, "runtime.json"), "credentialRef": filepath.Join(root, "credential.json"),
+		"credentialGeneration": 1, "policyRevision": 1, "artifactMaxBytes": 8388608, "policyCeiling": "read-only", "workspaceAlias": "local",
+	}
+	writeConfig := func() {
+		data, err := json.Marshal(config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := protectedfile.WriteFile(configPath, data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeConfig()
+	managed := exec.Command(workerBin, "--managed-control")
+	input, err := managed.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := managed.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	managed.Stderr = os.Stderr
+	if err := managed.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { stopCodexSupervisor(managed, input) })
+	reader := bufio.NewReader(output)
+	control := func(kind codexruntime.ControlKind, revision uint64) codexruntime.ControlEvent {
+		data, err := codexruntime.MarshalControlMessage(codexruntime.ControlMessage{SchemaVersion: 1, Kind: kind, ConfigPath: configPath, ConfigRevision: revision, RequestID: "fixture-control", WorkspaceAlias: "local"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := input.Write(data); err != nil {
+			t.Fatal(err)
+		}
+		var event codexruntime.ControlEvent
+		err = json.Unmarshal(readLineWithTimeout(t, reader, 5*time.Second), &event)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event.Kind != codexruntime.ControlEventReady {
+			t.Fatalf("managed readiness kind=%s error=%s", event.Kind, event.Error)
+		}
+		return event
+	}
+	first := control(codexruntime.ControlKindStart, 1)
+	config["policyRevision"] = 2
+	writeConfig()
+	second := control(codexruntime.ControlKindConfigRevision, 2)
+	if first.Descriptor == nil || second.Descriptor == nil || first.Descriptor.Endpoint == second.Descriptor.Endpoint {
+		t.Fatal("managed restart did not publish a new listener")
+	}
+	waitForWorker(t, independentURL)
+	stopCodexSupervisor(managed, input)
+	waitForWorker(t, independentURL)
 }

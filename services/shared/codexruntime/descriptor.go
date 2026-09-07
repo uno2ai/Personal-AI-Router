@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"nvpair-shared/protectedfile"
 	"os"
 	"path/filepath"
 	"strings"
@@ -121,7 +122,7 @@ func WriteDescriptor(path string, descriptor RuntimeDescriptor) error {
 		return fmt.Errorf("marshal runtime descriptor: %w", err)
 	}
 	data = append(data, '\n')
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := protectedfile.EnsureDir(filepath.Dir(path)); err != nil {
 		return fmt.Errorf("create runtime directory: %w", err)
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".runtime-*.tmp")
@@ -130,7 +131,7 @@ func WriteDescriptor(path string, descriptor RuntimeDescriptor) error {
 	}
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
-	if err := tmp.Chmod(0o600); err != nil {
+	if err := protectedfile.Protect(tmp.Name()); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("protect runtime descriptor: %w", err)
 	}

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"nvpair-shared/codexruntime"
+	"nvpair-shared/protectedfile"
 )
 
 func TestPinnedLocalWorkerClientAuthenticatesAndPinsCertificate(t *testing.T) {
@@ -162,7 +163,7 @@ func writeTestCredential(t *testing.T, path, token, fingerprint string, generati
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+	if err := protectedfile.WriteFile(path, append(data, '\n')); err != nil {
 		t.Fatal(err)
 	}
 }

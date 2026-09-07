@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"nvpair-shared/codexprotocol"
+	"nvpair-shared/protectedfile"
 )
 
 const taskIndexVersion = 1
@@ -80,7 +81,7 @@ func OpenTaskIndex(path string) (*TaskIndex, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, errors.New("task index path is required")
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := protectedfile.EnsureDir(filepath.Dir(path)); err != nil {
 		return nil, fmt.Errorf("create task index directory: %w", err)
 	}
 	lock, err := acquireTaskIndexLock(path)
@@ -91,6 +92,11 @@ func OpenTaskIndex(path string) (*TaskIndex, error) {
 	if err != nil {
 		_ = releaseTaskIndexLock(lock)
 		return nil, fmt.Errorf("open task index: %w", err)
+	}
+	if err := protectedfile.Protect(path); err != nil {
+		file.Close()
+		releaseTaskIndexLock(lock)
+		return nil, err
 	}
 	entries, err := readTaskIndex(path)
 	if err != nil {

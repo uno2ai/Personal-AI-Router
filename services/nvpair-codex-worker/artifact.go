@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"nvpair-shared/codexprotocol"
+	"nvpair-shared/protectedfile"
 )
 
 const defaultArtifactRetention = 7 * 24 * time.Hour
@@ -46,7 +47,7 @@ func NewArtifactStore(root string, maxBytes int64) (*ArtifactStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve artifact root: %w", err)
 	}
-	if err := os.MkdirAll(canonical, 0o700); err != nil {
+	if err := protectedfile.EnsureDir(canonical); err != nil {
 		return nil, fmt.Errorf("create artifact root: %w", err)
 	}
 	return &ArtifactStore{root: canonical, maxBytes: maxBytes, retention: defaultArtifactRetention}, nil
@@ -71,7 +72,7 @@ func (s *ArtifactStore) StageHandoff(taskID, workspace string, handoff *codexpro
 		return fmt.Errorf("artifact workspace is not a directory")
 	}
 	taskDir := filepath.Join(s.root, taskID)
-	if err := os.MkdirAll(taskDir, 0o700); err != nil {
+	if err := protectedfile.EnsureDir(taskDir); err != nil {
 		return fmt.Errorf("create task artifact directory: %w", err)
 	}
 	for i := range handoff.Artifacts {

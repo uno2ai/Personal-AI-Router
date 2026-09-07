@@ -35,6 +35,21 @@ with the local Supervisor. `--tool-labels` publishes comma-separated local
 labels such as `powershell,cuda,docker` for capability-aware selection. The
 Worker rejects non-loopback listeners in this mode.
 
+On Windows, `--codex-bin` accepts native `codex.exe` or the `codex.cmd` /
+`codex.ps1` launcher from an npm installation. The Worker resolves npm launchers
+to the installed architecture-specific native executable without invoking a
+shell. Install optional npm dependencies, or provide the native executable's
+full path, if resolution fails. Other script launchers are rejected.
+
+Worker state, isolated Codex authentication, and local credentials use private
+Windows ACLs (current user, SYSTEM, and Administrators) or Unix `0700` directories
+and `0600` files. Managed configuration and credential readers reject access
+from other identities on both the file and its containing directory. A launcher
+must protect that directory and configuration before writing its bearer token.
+Windows app-server children start suspended and join a kill-on-close job before
+running; descendants terminate when their Worker-owned job closes. Journal and
+workspace locks retain Windows thread ownership across asynchronous callbacks.
+
 For a paired remote Worker, use the same PAIR cluster directory that owns the
 host certificate and pins:
 

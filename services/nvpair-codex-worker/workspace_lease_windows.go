@@ -9,39 +9,26 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"fmt"
-
-	"golang.org/x/sys/windows"
+	"nvpair-shared/winmutex"
 )
 
-type workspaceProcessLease struct{ handle windows.Handle }
+type workspaceProcessLease struct{ mutex *winmutex.Mutex }
 
 func acquireWorkspaceProcessLease(workspaceKey string) (*workspaceProcessLease, error) {
+	// workspaceKey is a volume/file identity, not a path relative to this process.
 	digest := sha256.Sum256([]byte(workspaceKey))
-	name, err := windows.UTF16PtrFromString("Local\\NVPAIR-CodexWorkspace-" + hex.EncodeToString(digest[:]))
-	if err != nil {
-		return nil, fmt.Errorf("encode workspace lease name: %w", err)
+	mutex, err := winmutex.Acquire("Local\\NVPAIR-CodexWorkspace-" + hex.EncodeToString(digest[:]))
+	if errors.Is(err, winmutex.ErrBusy) {
+		return nil, ErrWorkspaceBusy
 	}
-	handle, err := windows.CreateMutex(nil, true, name)
 	if err != nil {
-		if errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
-			if handle != 0 {
-				_ = windows.CloseHandle(handle)
-			}
-			return nil, ErrWorkspaceBusy
-		}
-		return nil, fmt.Errorf("create workspace lease: %w", err)
+		return nil, err
 	}
-	return &workspaceProcessLease{handle: handle}, nil
+	return &workspaceProcessLease{mutex: mutex}, nil
 }
-
-func releaseWorkspaceProcessLease(lease *workspaceProcessLease) error {
-	if lease == nil || lease.handle == 0 {
+func releaseWorkspaceProcessLease(lock *workspaceProcessLease) error {
+	if lock == nil {
 		return nil
 	}
-	err := windows.ReleaseMutex(lease.handle)
-	if closeErr := windows.CloseHandle(lease.handle); err == nil {
-		err = closeErr
-	}
-	return err
+	return lock.mutex.Close()
 }

@@ -17,11 +17,13 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/codexprotocol"
+	"nvpair-shared/protectedfile"
 )
 
 type WorkerClient interface {
@@ -112,12 +114,11 @@ func NewPinnedLocalWorkerClient(rawURL, credentialPath, expectedCertificateSHA25
 }
 
 func readLocalWorkerCredential(path string) (localWorkerCredential, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return localWorkerCredential{}, fmt.Errorf("stat local Worker credential: %w", err)
+	if err := protectedfile.Check(filepath.Dir(path)); err != nil {
+		return localWorkerCredential{}, fmt.Errorf("unprotected containing directory: %w", err)
 	}
-	if info.Mode().Perm()&0o077 != 0 {
-		return localWorkerCredential{}, errors.New("local Worker credential must not be group/world accessible")
+	if err := protectedfile.Check(path); err != nil {
+		return localWorkerCredential{}, fmt.Errorf("unprotected local Worker credential: %w", err)
 	}
 	file, err := os.Open(path)
 	if err != nil {

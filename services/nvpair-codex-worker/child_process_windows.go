@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -19,6 +20,11 @@ var childJobs sync.Map
 
 func prepareChildProcess(cmd *exec.Cmd, cwd string) (func(), func() error, error) {
 	cmd.Dir = cwd
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	// Assign the suspended child before it can create descendants outside its job.
+	cmd.SysProcAttr.CreationFlags |= windows.CREATE_SUSPENDED
 	job, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
 		return nil, nil, err
@@ -46,7 +52,7 @@ func prepareChildProcess(cmd *exec.Cmd, cwd string) (func(), func() error, error
 		}
 		childJobs.Store(cmd, job)
 		attached = true
-		return nil
+		return resumeChildProcess(uint32(cmd.Process.Pid))
 	}
 	return cleanup, verify, nil
 }
@@ -74,4 +80,31 @@ func releaseChildProcess(cmd *exec.Cmd) {
 	if value, ok := childJobs.LoadAndDelete(cmd); ok {
 		_ = windows.CloseHandle(value.(windows.Handle))
 	}
+}
+
+// Go closes CreateProcess's primary thread handle. Locate that sole suspended
+// thread through the documented Toolhelp API, then resume after job assignment.
+func resumeChildProcess(pid uint32) error {
+	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPTHREAD, 0)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(snapshot)
+	entry := windows.ThreadEntry32{Size: uint32(unsafe.Sizeof(windows.ThreadEntry32{}))}
+	for err := windows.Thread32First(snapshot, &entry); err == nil; err = windows.Thread32Next(snapshot, &entry) {
+		if entry.OwnerProcessID != pid {
+			continue
+		}
+		thread, err := windows.OpenThread(windows.THREAD_SUSPEND_RESUME, false, entry.ThreadID)
+		if err != nil {
+			return err
+		}
+		_, resumeErr := windows.ResumeThread(thread)
+		closeErr := windows.CloseHandle(thread)
+		if resumeErr != nil {
+			return resumeErr
+		}
+		return closeErr
+	}
+	return errors.New("suspended app-server thread was not found")
 }

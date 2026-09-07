@@ -18,6 +18,7 @@ import (
 
 	"nvpair-shared/codexprotocol"
 	"nvpair-shared/jsonrpc"
+	"nvpair-shared/protectedfile"
 )
 
 // Version is replaced by services/build.sh and services/build.bat at release
@@ -68,7 +69,11 @@ func appServerArguments() []string {
 }
 
 func (f AppServerFactory) command() (*exec.Cmd, error) {
-	cmd := exec.Command(f.binary, appServerArguments()...)
+	binary, err := resolveCodexExecutable(f.binary)
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.Command(binary, appServerArguments()...)
 	if f.isolatedHome == nil {
 		return cmd, nil
 	}
@@ -85,13 +90,13 @@ func (f AppServerFactory) command() (*exec.Cmd, error) {
 func (h *isolatedCodexHome) prepare() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if err := os.MkdirAll(h.path, 0o700); err != nil {
+	if err := protectedfile.EnsureDir(h.path); err != nil {
 		return fmt.Errorf("create isolated Codex home: %w", err)
 	}
-	if err := os.Chmod(h.path, 0o700); err != nil {
+	if err := protectedfile.Check(h.path); err != nil {
 		return fmt.Errorf("protect isolated Codex home: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Join(h.path, "sqlite"), 0o700); err != nil {
+	if err := protectedfile.EnsureDir(filepath.Join(h.path, "sqlite")); err != nil {
 		return fmt.Errorf("create isolated Codex sqlite home: %w", err)
 	}
 	return syncCodexAuth(h.path)
@@ -118,7 +123,7 @@ func syncCodexAuth(isolatedHome string) error {
 	if err != nil {
 		return fmt.Errorf("inspect Codex authentication: %w", err)
 	}
-	if destinationInfo, statErr := os.Stat(destination); statErr == nil && !sourceInfo.ModTime().After(destinationInfo.ModTime()) {
+	if destinationInfo, statErr := os.Stat(destination); statErr == nil && !sourceInfo.ModTime().After(destinationInfo.ModTime()) && protectedfile.Check(destination) == nil {
 		return nil
 	}
 	data, err := os.ReadFile(source)
@@ -137,7 +142,7 @@ func syncCodexAuth(isolatedHome string) error {
 			_ = os.Remove(temporaryPath)
 		}
 	}()
-	if err := temporary.Chmod(0o600); err != nil {
+	if err := protectedfile.Protect(temporary.Name()); err != nil {
 		return fmt.Errorf("protect staged Codex authentication: %w", err)
 	}
 	if _, err := temporary.Write(data); err != nil {

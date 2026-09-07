@@ -1,5 +1,3 @@
-//go:build !windows
-
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -29,6 +27,7 @@ func TestWorkspaceLeaseBlocksDifferentWorkerProcessesWithDifferentJournals(t *te
 		}
 	}
 	child := exec.Command(os.Args[0], "-test.run=TestWorkspaceLeaseProcessHelper")
+	child.Dir = childTemp
 	child.Env = append(os.Environ(),
 		"PAIR_WORKSPACE_LEASE_HELPER=1",
 		"PAIR_WORKSPACE_LEASE_JOURNAL="+filepath.Join(root, "child", "tasks.jsonl"),

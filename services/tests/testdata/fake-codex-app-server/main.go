@@ -48,6 +48,11 @@ func main() {
 			_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": message.ID, "result": result})
 		case "initialized":
 			initialized = true
+		case "config/read":
+			_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": message.ID, "result": map[string]any{
+				"config": map[string]any{}, "origins": map[string]any{},
+				"layers": []map[string]any{{"config": map[string]any{}, "name": "user", "version": "fixture"}},
+			}})
 		case "thread/start", "thread/resume":
 			if !initialized {
 				_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": message.ID, "error": map[string]any{"code": -32000, "message": "initialized notification required"}})

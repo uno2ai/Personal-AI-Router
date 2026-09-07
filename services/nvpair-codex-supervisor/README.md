@@ -60,3 +60,11 @@ There is no approval tool or approval relay. Worker approval events end in
 `blocked/approval_required`; only a human at the Worker host can continue.
 The Supervisor itself remains local stdio-only and is not exposed by the
 Windows firewall.
+
+## Local protected state on Windows
+
+The local Worker credential and its containing directory must permit access
+only to the current user, SYSTEM, and Administrators. The Supervisor validates
+Windows ACLs rather than Unix permission bits and rejects broad or missing
+DACLs. Unix group/world permission checks remain enforced. Supervisor task-index
+and management registry directories are protected before state is written.

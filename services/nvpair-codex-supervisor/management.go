@@ -20,6 +20,7 @@ import (
 
 	"nvpair-shared/codexprotocol"
 	"nvpair-shared/ipc"
+	"nvpair-shared/protectedfile"
 )
 
 type managementRequest struct {
@@ -52,7 +53,7 @@ func WriteManagementRegistry(directory, socketPath string, pid int) (func(), err
 	if strings.TrimSpace(directory) == "" || !filepath.IsAbs(directory) {
 		return nil, errors.New("management registry directory must be absolute")
 	}
-	if err := os.MkdirAll(directory, 0o700); err != nil {
+	if err := protectedfile.EnsureDir(directory); err != nil {
 		return nil, fmt.Errorf("create management registry directory: %w", err)
 	}
 	path := filepath.Join(directory, fmt.Sprintf("supervisor-%d.json", pid))
@@ -60,7 +61,7 @@ func WriteManagementRegistry(directory, socketPath string, pid int) (func(), err
 	if err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+	if err := protectedfile.WriteFile(path, append(data, '\n')); err != nil {
 		return nil, fmt.Errorf("write management registry: %w", err)
 	}
 	return func() { _ = os.Remove(path) }, nil
@@ -71,7 +72,7 @@ func (s *MCPServer) StartManagementSocket(ctx context.Context, path string) erro
 		return errors.New("management socket path must be absolute")
 	}
 	if runtime.GOOS != "windows" {
-		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		if err := protectedfile.EnsureDir(filepath.Dir(path)); err != nil {
 			return fmt.Errorf("create management socket directory: %w", err)
 		}
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {

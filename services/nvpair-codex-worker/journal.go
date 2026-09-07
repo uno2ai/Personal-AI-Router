@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"nvpair-shared/codexprotocol"
+	"nvpair-shared/protectedfile"
 )
 
 const journalVersion = 1
@@ -41,7 +42,7 @@ func NewJournal(path string) (*Journal, error) {
 	if path == "" {
 		return nil, errors.New("journal path is required")
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := protectedfile.EnsureDir(filepath.Dir(path)); err != nil {
 		return nil, fmt.Errorf("create journal directory: %w", err)
 	}
 	lockFile, err := acquireJournalLock(path)
@@ -52,6 +53,11 @@ func NewJournal(path string) (*Journal, error) {
 	if err != nil {
 		_ = releaseJournalLock(lockFile)
 		return nil, fmt.Errorf("open journal: %w", err)
+	}
+	if err := protectedfile.Protect(path); err != nil {
+		file.Close()
+		releaseJournalLock(lockFile)
+		return nil, err
 	}
 	entries, err := readJournal(path)
 	if err != nil {

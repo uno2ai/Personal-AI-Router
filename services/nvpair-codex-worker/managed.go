@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"nvpair-shared/codexruntime"
+	"nvpair-shared/protectedfile"
 )
 
 const managedWorkerConfigSchemaVersion = 1
@@ -103,6 +104,13 @@ func (c managedWorkerConfig) Validate() error {
 }
 
 func readManagedConfig(path string) (managedWorkerConfig, error) {
+	if err := protectedfile.Check(filepath.Dir(path)); err != nil {
+		return managedWorkerConfig{}, fmt.Errorf("unprotected containing directory: %w", err)
+	}
+	if err := protectedfile.Check(path); err != nil {
+		return managedWorkerConfig{}, fmt.Errorf("unprotected managed Worker config: %w", err)
+	}
+
 	file, err := os.Open(path)
 	if err != nil {
 		return managedWorkerConfig{}, fmt.Errorf("open managed Worker config: %w", err)
@@ -274,7 +282,7 @@ func startManagedWorker(config managedWorkerConfig) (*managedWorkerController, e
 		writeManagedUnavailableDescriptor(config, err)
 		return nil, fmt.Errorf("create Worker workspace: %w", err)
 	}
-	if err := os.MkdirAll(config.StateRoot, 0o700); err != nil {
+	if err := protectedfile.EnsureDir(config.StateRoot); err != nil {
 		writeManagedUnavailableDescriptor(config, err)
 		return nil, fmt.Errorf("create Worker state root: %w", err)
 	}
@@ -403,13 +411,13 @@ func resolveCodexExecutable(value string) (string, error) {
 		if info.Mode().Perm()&0o111 == 0 && runtime.GOOS != "windows" {
 			return "", errors.New("Codex executable is not executable")
 		}
-		return value, nil
+		return nativeCodexExecutable(value)
 	}
 	resolved, err := exec.LookPath(value)
 	if err != nil {
 		return "", fmt.Errorf("find Codex executable %q: %w", value, err)
 	}
-	return resolved, nil
+	return nativeCodexExecutable(resolved)
 }
 
 func (c *managedWorkerController) runHeartbeat() {
@@ -479,7 +487,7 @@ func (c *managedWorkerController) Stop() error {
 }
 
 func writeManagedCredential(path, token, fingerprint string, generation uint64) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := protectedfile.EnsureDir(filepath.Dir(path)); err != nil {
 		return fmt.Errorf("create credential directory: %w", err)
 	}
 	data, err := json.Marshal(struct {
@@ -490,22 +498,7 @@ func writeManagedCredential(path, token, fingerprint string, generation uint64) 
 	if err != nil {
 		return fmt.Errorf("marshal Worker credential: %w", err)
 	}
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
-		return fmt.Errorf("open Worker credential: %w", err)
-	}
-	if _, err := file.Write(append(data, '\n')); err != nil {
-		_ = file.Close()
-		return fmt.Errorf("write Worker credential: %w", err)
-	}
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
-		return fmt.Errorf("sync Worker credential: %w", err)
-	}
-	if err := file.Close(); err != nil {
-		return fmt.Errorf("close Worker credential: %w", err)
-	}
-	return nil
+	return protectedfile.WriteFile(path, append(data, '\n'))
 }
 
 func localServerCertificate() (tls.Certificate, string, error) {

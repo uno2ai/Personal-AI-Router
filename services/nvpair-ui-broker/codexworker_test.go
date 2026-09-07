@@ -4,17 +4,19 @@
 package main
 
 import (
+	"path/filepath"
 	"testing"
 
 	"nvpair-shared/codexruntime"
 )
 
 func TestCodexWorkerStartMessageUsesProtectedConfigReference(t *testing.T) {
-	message, err := codexWorkerStartMessage("/protected/codex-worker.json", 12)
+	path := filepath.Join(t.TempDir(), "codex-worker.json")
+	message, err := codexWorkerStartMessage(path, 12)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if message.Kind != codexruntime.ControlKindStart || message.ConfigPath != "/protected/codex-worker.json" || message.ConfigRevision != 12 {
+	if message.Kind != codexruntime.ControlKindStart || message.ConfigPath != path || message.ConfigRevision != 12 {
 		t.Fatalf("start message = %+v", message)
 	}
 	if message.WorkspaceAlias != "local" {

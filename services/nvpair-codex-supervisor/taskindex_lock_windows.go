@@ -1,50 +1,39 @@
 //go:build windows
 
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 package main
 
 import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"fmt"
+	"nvpair-shared/winmutex"
 	"path/filepath"
 	"strings"
-
-	"golang.org/x/sys/windows"
 )
 
-type taskIndexLock struct{ handle windows.Handle }
+type taskIndexLock struct{ mutex *winmutex.Mutex }
 
 func acquireTaskIndexLock(path string) (*taskIndexLock, error) {
 	absolute, err := filepath.Abs(path)
 	if err != nil {
-		return nil, fmt.Errorf("resolve task index lock path: %w", err)
+		return nil, err
 	}
 	digest := sha256.Sum256([]byte(strings.ToLower(filepath.Clean(absolute))))
-	name, err := windows.UTF16PtrFromString("Local\\NVPAIR-CodexSupervisor-" + hex.EncodeToString(digest[:]))
-	if err != nil {
-		return nil, fmt.Errorf("encode task index lock name: %w", err)
+	mutex, err := winmutex.Acquire("Local\\NVPAIR-CodexSupervisor-" + hex.EncodeToString(digest[:]))
+	if errors.Is(err, winmutex.ErrBusy) {
+		return nil, errors.New("task index is already open")
 	}
-	handle, err := windows.CreateMutex(nil, true, name)
 	if err != nil {
-		if errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
-			if handle != 0 {
-				_ = windows.CloseHandle(handle)
-			}
-			return nil, errors.New("task index is already open")
-		}
-		return nil, fmt.Errorf("create task index lock: %w", err)
+		return nil, err
 	}
-	return &taskIndexLock{handle: handle}, nil
+	return &taskIndexLock{mutex: mutex}, nil
 }
-
 func releaseTaskIndexLock(lock *taskIndexLock) error {
-	if lock == nil || lock.handle == 0 {
+	if lock == nil {
 		return nil
 	}
-	err := windows.ReleaseMutex(lock.handle)
-	if closeErr := windows.CloseHandle(lock.handle); err == nil {
-		err = closeErr
-	}
-	return err
+	return lock.mutex.Close()
 }

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"nvpair-shared/protectedfile"
 	"os"
 	"path/filepath"
 	"strings"
@@ -279,12 +280,12 @@ func TestWorkerChildUsesIsolatedCodexHomeWithoutCopyingUserConfiguration(t *test
 	if err != nil || string(data) != `{"token":"fixture"}` {
 		t.Fatalf("isolated authentication=%q err=%v", data, err)
 	}
-	info, err := os.Stat(filepath.Join(isolatedHome, "auth.json"))
+	_, err = os.Stat(filepath.Join(isolatedHome, "auth.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm()&0o077 != 0 {
-		t.Fatalf("isolated authentication permissions are too broad: %o", info.Mode().Perm())
+	if err := protectedfile.Check(filepath.Join(isolatedHome, "auth.json")); err != nil {
+		t.Fatal(err)
 	}
 }
 
