@@ -4,6 +4,7 @@
     "include": [
         "src/shared/**/*.ts",
         "tests/modular/**/*.test.ts",
+        "tests/e2e/codex-desktop.e2e.test.ts",
         "vitest.config.ts",
         "scripts/test-clean.ts"
     ],
@@ -16,6 +17,7 @@
     "exclude": ["src/ui/**", "node_modules", "dist", "out", "src/**/*.tsx"],
     "compilerOptions": {
         "composite": false,
+        "paths": { "@/*": ["./src/*"], "@tests/*": ["./tests/*"] },
         "moduleResolution": "bundler",
         "types": ["node", "vitest/globals"]
     }

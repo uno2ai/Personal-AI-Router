@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -21,6 +22,8 @@ import (
 )
 
 func main() {
+	protectedOperation := flag.String("protected-file", "", "one-shot protected file operation: read, read-owned-input, write")
+	protectedPath := flag.String("protected-path", "", "absolute path for the protected file operation")
 	ipcPath := flag.String("ipc", "", "IPC endpoint: Unix domain socket path or Windows named pipe (default: stdin/stdout)")
 	scannerPath := flag.String("scanner-path", "", "path to nvpair-node-scanner binary (default: ./nvpair-node-scanner in the current working directory)")
 	nodeInfoPath := flag.String("node-info-path", "", "path to nvpair-node-info binary (default: ./nvpair-node-info in the current working directory)")
@@ -40,6 +43,16 @@ func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	resolveLevel := applog.RegisterFlag(nil, slog.LevelInfo)
 	flag.Parse()
+	if *protectedOperation != "" {
+		if err := protectedFileCLI(*protectedOperation, *protectedPath, os.Stdin, os.Stdout); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				os.Exit(3)
+			}
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	if *showVersion {
 		fmt.Println(Version)

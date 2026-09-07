@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+import { getCliBinDir } from '@/electron/cli-bin'
 import fs from 'fs'
 import path from 'path'
 import { app } from 'electron'
@@ -48,7 +49,11 @@ import type { ServiceError, ServiceErrorSeverity } from '@/shared/types/errors'
 import type { ClusterNode } from '@/shared/types/cluster'
 import type { EngineType } from '@/shared/types/engines'
 import { APP_DISPLAY_NAME } from '@/shared/constants/app'
-import { codexConfigPath, codexWorkerConfigPath, loadCodexConfig } from '@/electron/codex/config-store'
+import {
+    codexConfigPath,
+    codexWorkerConfigPath,
+    loadCodexConfig
+} from '@/electron/codex/config-store'
 
 const log = createStructuredLogger('service-bridge')
 const ENGINE_PREPARE_SHUTDOWN_METHOD = 'engine:prepare-shutdown'
@@ -73,14 +78,6 @@ export async function prepareLocalEnginesForShutdown(
     broker: Pick<JsonRpcSubprocess, 'call'>
 ): Promise<void> {
     await broker.call(ENGINE_PREPARE_SHUTDOWN_METHOD, undefined, 30_000)
-}
-
-export function getCliBinDir(): string {
-    if (app.isPackaged) {
-        return path.join(process.resourcesPath, 'cli-bin')
-    }
-
-    return path.join(app.getAppPath(), 'cli-bin')
 }
 
 function getModularBinaryPath(baseName: string): string {

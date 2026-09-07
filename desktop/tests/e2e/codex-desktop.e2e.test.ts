@@ -6,86 +6,32 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import crypto from 'node:crypto'
-import { once } from 'node:events'
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
+
+import type { JsonObject } from '@/electron/service-bridge/json-rpc-subprocess'
+import { runProtectedFile } from '@/electron/protected-file'
+import {
+    JsonLineProcess,
+    stopProcess,
+    stopOwnedProcesses,
+    parseNativeObject,
+    isNativeObject
+} from '@tests/fixtures/native-process'
 
 const native = process.env['PAIR_RUN_CODEX_E2E'] === '1'
 
-class JsonLineProcess {
-    private buffer = ''
-    private stderr = ''
-    private readonly waiting: Array<{
-        predicate: (value: Record<string, unknown>) => boolean
-        resolve: (value: Record<string, unknown>) => void
-        reject: (error: Error) => void
-        timer: NodeJS.Timeout
-    }> = []
-
-    constructor(private readonly process: ChildProcessWithoutNullStreams) {
-        process.stderr.on('data', chunk => {
-            this.stderr += chunk.toString('utf8')
-            if (this.stderr.length > 4000) this.stderr = this.stderr.slice(-4000)
-        })
-        process.stdout.on('data', chunk => {
-            this.buffer += chunk.toString('utf8')
-            for (;;) {
-                const newline = this.buffer.indexOf('\n')
-                if (newline < 0) return
-                const line = this.buffer.slice(0, newline)
-                this.buffer = this.buffer.slice(newline + 1)
-                try {
-                    const value = JSON.parse(line) as unknown
-                    if (!value || typeof value !== 'object' || Array.isArray(value)) continue
-                    this.deliver(value as Record<string, unknown>)
-                } catch {
-                    // A malformed child line is ignored; the timeout reports the
-                    // missing lifecycle/MCP response to the test.
-                }
-            }
-        })
-    }
-
-    next(
-        predicate: (value: Record<string, unknown>) => boolean,
-        timeoutMs = 15_000,
-        label = 'native Codex process response'
-    ): Promise<Record<string, unknown>> {
-        return new Promise((resolve, reject) => {
-            const timer = setTimeout(() => {
-                const index = this.waiting.findIndex(item => item.timer === timer)
-                if (index >= 0) this.waiting.splice(index, 1)
-                reject(new Error(`timed out waiting for ${label}; stderr=${this.stderr}`))
-            }, timeoutMs)
-            this.waiting.push({ predicate, resolve, reject, timer })
-        })
-    }
-
-    stderrText(): string {
-        return this.stderr
-    }
-
-    private deliver(value: Record<string, unknown>): void {
-        const index = this.waiting.findIndex(item => item.predicate(value))
-        if (index < 0) return
-        const item = this.waiting.splice(index, 1)[0]
-        clearTimeout(item.timer)
-        item.resolve(value)
-    }
-}
-
-function writeJsonLine(
-    process: ChildProcessWithoutNullStreams,
-    value: Record<string, unknown>
-): void {
+function writeJsonLine(process: ChildProcessWithoutNullStreams, value: JsonObject): void {
     process.stdin.write(`${JSON.stringify(value)}\n`)
 }
 
-function toolText(response: Record<string, unknown>): string {
-    const result = response.result as { content?: Array<{ text?: unknown }> } | undefined
-    const text = result?.content?.[0]?.text
-    if (typeof text !== 'string')
-        throw new Error(`native MCP response has no text content: ${JSON.stringify(response)}`)
+function toolText(response: JsonObject): string {
+    const result = response.result
+    if (!isNativeObject(result) || !Array.isArray(result.content))
+        throw new Error('native MCP response has no content')
+    const item = result.content[0]
+    const text = isNativeObject(item) ? item.text : null
+    if (typeof text !== 'string') throw new Error('native MCP response has no text content')
     return text
 }
 
@@ -116,7 +62,7 @@ async function waitForLocalWorker(
         id++
         await new Promise(resolve => setTimeout(resolve, 100))
     }
-    throw new Error(`local Worker did not converge within ${timeoutMs}ms; last=${last}`)
+    throw new Error(`local Worker did not converge within ${timeoutMs}ms; ${lines.diagnostics()}`)
 }
 
 function executablePath(directory: string, baseName: string): string {
@@ -133,7 +79,11 @@ interface NativeWorkerFixture {
     workerInstanceId: string
 }
 
-function createNativeWorkerFixture(root: string, codexBin: string): NativeWorkerFixture {
+function createNativeWorkerFixture(
+    root: string,
+    codexBin: string,
+    cliBin: string
+): NativeWorkerFixture {
     const workspace = path.join(root, 'workspace')
     const state = path.join(root, 'worker-state')
     const runtime = path.join(root, 'runtime.json')
@@ -143,7 +93,9 @@ function createNativeWorkerFixture(root: string, codexBin: string): NativeWorker
     const workerInstanceId = crypto.randomUUID()
     fs.mkdirSync(workspace, { recursive: true, mode: 0o700 })
     execFileSync('git', ['init', '--quiet', workspace])
-    fs.writeFileSync(
+    runProtectedFile(
+        executablePath(cliBin, 'nvpair-ui-broker'),
+        'write',
         workerConfig,
         `${JSON.stringify(
             {
@@ -169,8 +121,7 @@ function createNativeWorkerFixture(root: string, codexBin: string): NativeWorker
             },
             null,
             2
-        )}\n`,
-        { mode: 0o600 }
+        )}\n`
     )
     return { workerConfig, runtime, credential, state, workspace, installationId, workerInstanceId }
 }
@@ -179,16 +130,17 @@ async function waitForRuntimeDescriptor(
     runtimePath: string,
     minimumBootEpoch = 0,
     timeoutMs = 30_000
-): Promise<Record<string, unknown>> {
+): Promise<JsonObject> {
     const deadline = Date.now() + timeoutMs
     let last = ''
     while (Date.now() < deadline) {
         try {
-            const descriptor = JSON.parse(fs.readFileSync(runtimePath, 'utf8')) as Record<
-                string,
-                unknown
-            >
-            last = JSON.stringify(descriptor)
+            const descriptor = parseNativeObject(fs.readFileSync(runtimePath, 'utf8'))
+            last =
+                typeof descriptor.state === 'string' &&
+                ['ready', 'starting', 'stopped', 'unavailable'].includes(descriptor.state)
+                    ? descriptor.state
+                    : 'invalid-state'
             if (
                 descriptor.state === 'ready' &&
                 typeof descriptor.bootEpoch === 'number' &&
@@ -196,29 +148,12 @@ async function waitForRuntimeDescriptor(
             ) {
                 return descriptor
             }
-        } catch (error) {
-            last = error instanceof Error ? error.message : String(error)
+        } catch {
+            last = 'descriptor-unreadable'
         }
         await new Promise(resolve => setTimeout(resolve, 100))
     }
     throw new Error(`timed out waiting for ready runtime descriptor ${runtimePath}; last=${last}`)
-}
-
-async function stopProcess(
-    child: ChildProcessWithoutNullStreams,
-    signal: NodeJS.Signals = 'SIGTERM'
-): Promise<void> {
-    if (child.exitCode !== null) return
-    child.kill(signal)
-    await Promise.race([
-        once(child, 'exit'),
-        new Promise((_, reject) =>
-            setTimeout(
-                () => reject(new Error(`process ${child.pid ?? '<unknown>'} did not exit`)),
-                20_000
-            )
-        )
-    ])
 }
 
 describe('packaged Codex Desktop native contract', () => {
@@ -226,10 +161,9 @@ describe('packaged Codex Desktop native contract', () => {
         const cliBin = process.env['PAIR_CODEX_E2E_CLI_BIN']
         if (!cliBin) throw new Error('PAIR_CODEX_E2E_CLI_BIN is required for native Codex E2E')
         const manifestPath = path.join(cliBin, 'manifest.json')
-        const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as {
-            files?: Array<{ fileName?: string }>
-        }
-        const names = new Set((manifest.files ?? []).map(file => file.fileName))
+        const manifest = parseNativeObject(fs.readFileSync(manifestPath, 'utf8'))
+        const files = Array.isArray(manifest.files) ? manifest.files : []
+        const names = new Set(files.filter(isNativeObject).map(file => file.fileName))
         const suffix = process.platform === 'win32' ? '.exe' : ''
         expect(names.has(`nvpair-codex-worker${suffix}`)).toBe(true)
         expect(names.has(`nvpair-codex-supervisor${suffix}`)).toBe(true)
@@ -257,7 +191,9 @@ describe('packaged Codex Desktop native contract', () => {
         fs.mkdirSync(workspace, { recursive: true, mode: 0o700 })
         execFileSync('git', ['init', '--quiet', workspace])
         const workerConfig = path.join(root, 'worker-config.json')
-        fs.writeFileSync(
+        runProtectedFile(
+            executablePath(cliBin, 'nvpair-ui-broker'),
+            'write',
             workerConfig,
             `${JSON.stringify(
                 {
@@ -283,8 +219,7 @@ describe('packaged Codex Desktop native contract', () => {
                 },
                 null,
                 2
-            )}\n`,
-            { mode: 0o600 }
+            )}\n`
         )
 
         let worker: ChildProcessWithoutNullStreams | null = null
@@ -309,7 +244,9 @@ describe('packaged Codex Desktop native contract', () => {
                 15_000,
                 'managed Worker ready'
             )
-            expect((ready.descriptor as Record<string, unknown>).state).toBe('ready')
+            expect(isNativeObject(ready.descriptor) && ready.descriptor.state === 'ready').toBe(
+                true
+            )
 
             supervisor = spawn(
                 executablePath(cliBin, 'nvpair-codex-supervisor'),
@@ -339,14 +276,14 @@ describe('packaged Codex Desktop native contract', () => {
                 15_000,
                 'Supervisor initialize'
             )
-            expect(initialized.error).toBeUndefined()
+            expect(initialized.error === undefined).toBe(true)
             writeJsonLine(supervisor, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} })
             const tools = await supervisorLines.next(
                 value => value.id === 2,
                 15_000,
                 'Supervisor tools/list'
             )
-            expect(JSON.stringify(tools.result)).toContain('workers.list')
+            expect(JSON.stringify(tools.result).includes('workers.list')).toBe(true)
             writeJsonLine(supervisor, {
                 jsonrpc: '2.0',
                 id: 3,
@@ -358,7 +295,7 @@ describe('packaged Codex Desktop native contract', () => {
                 15_000,
                 'Supervisor workers.list'
             )
-            expect(JSON.stringify(workers.result)).toContain('worker')
+            expect(JSON.stringify(workers.result).includes('worker')).toBe(true)
 
             writeJsonLine(supervisor, {
                 jsonrpc: '2.0',
@@ -380,17 +317,21 @@ describe('packaged Codex Desktop native contract', () => {
                 90_000,
                 'native read-only task delegation'
             )
-            const delegatedResult = delegated.result as { isError?: boolean } | undefined
-            expect(delegated.error).toBeUndefined()
-            expect(delegatedResult?.isError).not.toBe(true)
-            const delegatedPayload = JSON.parse(toolText(delegated)) as {
-                record?: { taskId?: string; attemptId?: string; leaseEpoch?: number }
-            }
+            const delegatedResult = delegated.result
+            expect(delegated.error === undefined).toBe(true)
+            expect(isNativeObject(delegatedResult) && delegatedResult.isError !== true).toBe(true)
+            const delegatedPayload = parseNativeObject(toolText(delegated))
             const task = delegatedPayload.record
-            if (!task?.taskId || !task.attemptId || !task.leaseEpoch) {
-                throw new Error(
-                    `native task delegation returned no fenced record: ${toolText(delegated)}`
-                )
+            if (
+                !isNativeObject(task) ||
+                typeof task.taskId !== 'string' ||
+                !task.taskId ||
+                typeof task.attemptId !== 'string' ||
+                !task.attemptId ||
+                typeof task.leaseEpoch !== 'number' ||
+                !task.leaseEpoch
+            ) {
+                throw new Error('native task delegation returned no fenced record')
             }
 
             let terminalState = ''
@@ -407,8 +348,8 @@ describe('packaged Codex Desktop native contract', () => {
                     15_000,
                     `native task status ${attempt + 1}`
                 )
-                const statusPayload = JSON.parse(toolText(statusResponse)) as { state?: string }
-                terminalState = statusPayload.state ?? ''
+                const statusPayload = parseNativeObject(toolText(statusResponse))
+                terminalState = typeof statusPayload.state === 'string' ? statusPayload.state : ''
                 if (['completed', 'blocked', 'failed', 'cancelled', 'lost'].includes(terminalState))
                     break
                 await new Promise(resolve => setTimeout(resolve, 1_000))
@@ -426,25 +367,19 @@ describe('packaged Codex Desktop native contract', () => {
             )
             if (terminalState !== 'completed') {
                 throw new Error(
-                    `native read-only task ended in ${terminalState}: ${toolText(taskResult)}; worker stderr=${workerLines?.stderrText() ?? ''}`
+                    `native read-only task did not complete; taskId=${task.taskId}; ${workerLines?.diagnostics() ?? 'worker unavailable'}`
                 )
             }
             expect(terminalState).toBe('completed')
-            expect(JSON.stringify(taskResult.result)).toContain(task.taskId)
+            expect(JSON.stringify(taskResult.result).includes(task.taskId)).toBe(true)
         } finally {
-            if (supervisor) {
-                supervisor.stdin.end()
-                await once(supervisor, 'exit').catch(() => undefined)
-            }
-            if (worker) {
+            if (worker?.stdin.writable)
                 writeJsonLine(worker, {
                     schemaVersion: 1,
                     kind: 'shutdown',
                     requestId: 'native-e2e-shutdown'
                 })
-                worker.stdin.end()
-                await once(worker, 'exit').catch(() => undefined)
-            }
+            await stopOwnedProcesses([supervisor, worker])
             fs.rmSync(root, { recursive: true, force: true })
         }
     })
@@ -466,9 +401,11 @@ describe('packaged Codex Desktop native contract', () => {
 
             const codexDir = path.join(userData, 'codex')
             fs.mkdirSync(codexDir, { recursive: true, mode: 0o700 })
-            const owned = createNativeWorkerFixture(codexDir, codexBin)
-            const independent = createNativeWorkerFixture(independentRoot, codexBin)
-            fs.writeFileSync(
+            const owned = createNativeWorkerFixture(codexDir, codexBin, cliBin)
+            const independent = createNativeWorkerFixture(independentRoot, codexBin, cliBin)
+            runProtectedFile(
+                executablePath(cliBin, 'nvpair-ui-broker'),
+                'write',
                 path.join(codexDir, 'config.json'),
                 `${JSON.stringify(
                     {
@@ -486,8 +423,7 @@ describe('packaged Codex Desktop native contract', () => {
                     },
                     null,
                     2
-                )}\n`,
-                { mode: 0o600 }
+                )}\n`
             )
 
             const appEnv = {
@@ -523,7 +459,9 @@ describe('packaged Codex Desktop native contract', () => {
 
                 app = spawn(appBin, [], { env: appEnv, stdio: 'pipe' })
                 const first = await waitForRuntimeDescriptor(path.join(codexDir, 'runtime.json'))
-                const firstBootEpoch = first.bootEpoch as number
+                const firstBootEpoch = first.bootEpoch
+                if (typeof firstBootEpoch !== 'number')
+                    throw new Error('runtime boot epoch is missing')
 
                 supervisor = spawn(
                     executablePath(cliBin, 'nvpair-codex-supervisor'),
@@ -549,8 +487,8 @@ describe('packaged Codex Desktop native contract', () => {
                     }
                 })
                 expect(
-                    (await supervisorLines.next(value => value.id === 300)).error
-                ).toBeUndefined()
+                    (await supervisorLines.next(value => value.id === 300)).error === undefined
+                ).toBe(true)
                 await waitForLocalWorker(supervisor, supervisorLines, 301)
 
                 if (process.env['PAIR_RUN_MAIN_CODEX_E2E'] === '1') {
@@ -563,7 +501,7 @@ describe('packaged Codex Desktop native contract', () => {
                         '--management-socket-dir',
                         path.join(codexDir, 'management')
                     ]
-                    const mainOutput = execFileSync(
+                    const mainProcess = spawnSync(
                         codexBin,
                         [
                             'exec',
@@ -583,9 +521,20 @@ describe('packaged Codex Desktop native contract', () => {
                             `mcp_servers.pair-codex-supervisor.args=${JSON.stringify(supervisorArgs)}`,
                             'Call pair-codex-supervisor workers.list exactly once. If it returns worker id local, answer exactly PACKAGED_ELECTRON_MAIN_CODEX_OK. Do not call any other tool.'
                         ],
-                        { encoding: 'utf8', timeout: 120_000, maxBuffer: 4 << 20 }
+                        {
+                            encoding: 'utf8',
+                            timeout: 120_000,
+                            maxBuffer: 4 << 20,
+                            windowsHide: true
+                        }
                     )
-                    expect(mainOutput).toContain('PACKAGED_ELECTRON_MAIN_CODEX_OK')
+                    if (mainProcess.error || mainProcess.status !== 0)
+                        throw new Error(
+                            `Main Codex fixture failed; exit=${mainProcess.status ?? 'unavailable'}`
+                        )
+                    expect(mainProcess.stdout.includes('PACKAGED_ELECTRON_MAIN_CODEX_OK')).toBe(
+                        true
+                    )
                 }
 
                 await stopProcess(app)
@@ -601,20 +550,13 @@ describe('packaged Codex Desktop native contract', () => {
                 await waitForLocalWorker(supervisor, supervisorLines, 400)
                 expect(independentWorker.exitCode).toBeNull()
             } finally {
-                if (supervisor) {
-                    supervisor.stdin.end()
-                    await once(supervisor, 'exit').catch(() => undefined)
-                }
-                if (app) await stopProcess(app).catch(() => app?.kill('SIGKILL'))
-                if (independentWorker) {
+                if (independentWorker?.stdin.writable)
                     writeJsonLine(independentWorker, {
                         schemaVersion: 1,
                         kind: 'shutdown',
                         requestId: 'independent-shutdown'
                     })
-                    independentWorker.stdin.end()
-                    await once(independentWorker, 'exit').catch(() => undefined)
-                }
+                await stopOwnedProcesses([supervisor, app, independentWorker])
                 fs.rmSync(root, { recursive: true, force: true })
             }
         },

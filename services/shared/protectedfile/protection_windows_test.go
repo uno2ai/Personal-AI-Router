@@ -332,6 +332,74 @@ func TestWindowsMissingProtectedFileRetainsNotExistError(t *testing.T) {
 	}
 }
 
+func TestWindowsOwnedInputPreservesInheritedDACLAndPinsAncestors(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "Main config.toml")
+	if err := os.WriteFile(path, []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if file, err := Open(path); err == nil {
+		file.Close()
+		t.Fatal("strict reader accepted inherited input")
+	}
+	file, err := OpenOwnedInput(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if err := os.Rename(directory, directory+"-moved"); err == nil {
+		t.Fatal("owned input did not pin its ancestor")
+	}
+	data, err := io.ReadAll(file)
+	if err != nil || string(data) != "fixture" {
+		t.Fatal("owned input read failed")
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	after, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil || before.String() != after.String() {
+		t.Fatal("owned input changed its ACL")
+	}
+	link := filepath.Join(t.TempDir(), "redirect")
+	makeTestJunction(t, link, directory)
+	if file, err := OpenOwnedInput(filepath.Join(link, filepath.Base(path))); err == nil {
+		file.Close()
+		t.Fatal("owned input accepted junction")
+	}
+}
+
+func TestWindowsOwnedInputRejectsForeignOwner(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "foreign-input")
+	if err := os.WriteFile(path, []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	original, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, _, err := original.Owner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreign, err := windows.StringToSid("S-1-5-32-545")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, foreign, nil, nil, nil); err != nil {
+		t.Skipf("token cannot assign an untrusted test owner: %v", err)
+	}
+	defer windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, owner, nil, nil, nil)
+	if file, err := OpenOwnedInput(path); err == nil {
+		file.Close()
+		t.Fatal("owned input accepted foreign owner")
+	}
+}
+
 func setTestDACL(t *testing.T, path, sddl string, flags windows.SECURITY_INFORMATION) {
 	t.Helper()
 	sd, err := windows.SecurityDescriptorFromString(sddl)

@@ -2,15 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import crypto from 'node:crypto'
-import fs from 'node:fs'
 import path from 'node:path'
 
+import { readMainCodexInput, writeProtectedConfig } from './protected-config'
 import { CODEX_REGISTRATION_NAME } from './config-store'
 import type { CodexMcpRegistration } from '@/shared/types/codex'
 
 const OWNERSHIP_MARKER = '# Managed by PAIR Codex Desktop; ownership=v1'
 
-export interface McpRegistrationSnapshot extends CodexMcpRegistration {
+interface McpRegistrationSnapshot extends CodexMcpRegistration {
     fingerprint: string
 }
 
@@ -21,13 +21,13 @@ interface BlockLocation {
 }
 
 export function fingerprintFile(filePath: string): string | null {
-    if (!fs.existsSync(filePath)) return null
-    return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex')
+    const text = readMainCodexInput(filePath)
+    return text === null ? null : fingerprintText(text)
 }
 
 export function getMcpRegistration(filePath: string): McpRegistrationSnapshot | null {
-    if (!fs.existsSync(filePath)) return null
-    const text = fs.readFileSync(filePath, 'utf8')
+    const text = readMainCodexInput(filePath)
+    if (text === null) return null
     const location = locateBlock(text)
     if (!location || !location.owned) return null
     const lines = text.split(/\r?\n/).slice(location.start, location.end)
@@ -36,7 +36,7 @@ export function getMcpRegistration(filePath: string): McpRegistrationSnapshot | 
     if (!commandLine || !argsLine) throw new Error('Managed MCP entry is incomplete')
     const command = parseTomlString(commandLine)
     const args = parseTomlStringArray(argsLine)
-    return { command, args, fingerprint: fingerprintFile(filePath) ?? '' }
+    return { command, args, fingerprint: fingerprintText(text) }
 }
 
 export function applyMcpRegistration(
@@ -44,47 +44,53 @@ export function applyMcpRegistration(
     registration: CodexMcpRegistration,
     expectedFingerprint?: string | null
 ): McpRegistrationSnapshot {
-    const before = fingerprintFile(filePath)
+    const original = readMainCodexInput(filePath)
+    const before = original === null ? null : fingerprintText(original)
     if (expectedFingerprint !== undefined && before !== expectedFingerprint) {
         throw new Error('Main Codex config changed concurrently; reload before applying')
     }
-    const text = fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf8') : ''
+    const text = original ?? ''
     const location = locateBlock(text)
     if (location && !location.owned) {
-        throw new Error(`MCP registration ${CODEX_REGISTRATION_NAME} is ambiguous or not PAIR-owned`)
+        throw new Error(
+            `MCP registration ${CODEX_REGISTRATION_NAME} is ambiguous or not PAIR-owned`
+        )
     }
     const block = renderBlock(registration)
     const next = location
         ? replaceLines(text, location, block)
         : `${text.replace(/\s*$/, '')}${text.trim() ? '\n\n' : ''}${block}\n`
-    atomicWriteWithBackup(filePath, next)
+    atomicWriteWithBackup(filePath, next, original)
     const fingerprint = fingerprintFile(filePath)
     if (!fingerprint) throw new Error('MCP config disappeared after write')
     return { ...registration, fingerprint }
 }
 
-export function removeMcpRegistration(filePath: string, expectedFingerprint?: string | null): boolean {
-    const before = fingerprintFile(filePath)
+export function removeMcpRegistration(
+    filePath: string,
+    expectedFingerprint?: string | null
+): boolean {
+    const original = readMainCodexInput(filePath)
+    const before = original === null ? null : fingerprintText(original)
     if (expectedFingerprint !== undefined && before !== expectedFingerprint) {
         throw new Error('Main Codex config changed concurrently; reload before removing')
     }
-    if (!fs.existsSync(filePath)) return false
-    const text = fs.readFileSync(filePath, 'utf8')
+    if (original === null) return false
+    const text = original
     const location = locateBlock(text)
     if (!location) return false
-    if (!location.owned) throw new Error(`MCP registration ${CODEX_REGISTRATION_NAME} is not PAIR-owned`)
+    if (!location.owned)
+        throw new Error(`MCP registration ${CODEX_REGISTRATION_NAME} is not PAIR-owned`)
     const next = replaceLines(text, location, '')
-    atomicWriteWithBackup(filePath, next)
+    atomicWriteWithBackup(filePath, next, original)
     return true
 }
 
-export function renderManagedMcpRegistration(registration: CodexMcpRegistration): string {
-    return renderBlock(registration)
-}
-
 function renderBlock(registration: CodexMcpRegistration): string {
-    if (!path.isAbsolute(registration.command)) throw new Error('Supervisor command must be absolute')
-    if (registration.args.some(arg => typeof arg !== 'string')) throw new Error('Supervisor args must be strings')
+    if (!path.isAbsolute(registration.command))
+        throw new Error('Supervisor command must be absolute')
+    if (registration.args.some(arg => typeof arg !== 'string'))
+        throw new Error('Supervisor args must be strings')
     return `${OWNERSHIP_MARKER}\n[mcp_servers.${CODEX_REGISTRATION_NAME}]\ncommand = ${JSON.stringify(registration.command)}\nargs = ${JSON.stringify(registration.args)}\n`
 }
 
@@ -103,7 +109,10 @@ function replaceLines(text: string, location: BlockLocation, replacement: string
     const lines = text.split(/\r?\n/)
     const replacementLines = replacement ? replacement.replace(/\n$/, '').split('\n') : []
     lines.splice(location.start, location.end - location.start, ...replacementLines)
-    return `${lines.join('\n').replace(/\n{3,}/g, '\n\n').replace(/\s+$/, '')}\n`
+    return `${lines
+        .join('\n')
+        .replace(/\n{3,}/g, '\n\n')
+        .replace(/\s+$/, '')}\n`
 }
 
 function parseTomlString(line: string): string {
@@ -122,30 +131,11 @@ function parseTomlStringArray(line: string): string[] {
     return parsed
 }
 
-function atomicWriteWithBackup(filePath: string, content: string): void {
-    const directory = path.dirname(filePath)
-    fs.mkdirSync(directory, { recursive: true, mode: 0o700 })
-    if (fs.existsSync(filePath)) {
-        const backup = `${filePath}.bak-${Date.now()}`
-        fs.copyFileSync(filePath, backup)
-        try {
-            fs.chmodSync(backup, 0o600)
-        } catch {
-            /* best effort on Windows */
-        }
-    }
-    const temporary = path.join(directory, `.${path.basename(filePath)}.${crypto.randomUUID()}.tmp`)
-    const fd = fs.openSync(temporary, 'w', 0o600)
-    try {
-        fs.writeFileSync(fd, content, 'utf8')
-        fs.fsyncSync(fd)
-    } finally {
-        fs.closeSync(fd)
-    }
-    try {
-        fs.chmodSync(temporary, 0o600)
-    } catch {
-        /* best effort on Windows */
-    }
-    fs.renameSync(temporary, filePath)
+function fingerprintText(text: string): string {
+    return crypto.createHash('sha256').update(text).digest('hex')
+}
+
+function atomicWriteWithBackup(filePath: string, content: string, original: string | null): void {
+    if (original !== null) writeProtectedConfig(`${filePath}.bak-${crypto.randomUUID()}`, original)
+    writeProtectedConfig(filePath, content)
 }

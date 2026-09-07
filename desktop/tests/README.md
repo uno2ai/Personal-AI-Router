@@ -61,6 +61,19 @@ filesystem effects.
 
 ## Type discipline
 
+Codex configuration tests build a fresh native broker in a test-owned temporary
+directory. They inspect actual Windows DACLs, use directory junctions without
+requiring symbolic-link privilege, and cover protected creation, backups,
+inherited Main config reads, missing helpers, and path rejection. Windows ACL
+inspection uses the installed Windows PowerShell .NET file-security reader;
+security enforcement remains in Go. Dependencies are not installed by tests.
+
+The opt-in native Codex fixture uses the same protected writer and the broker
+from `PAIR_CODEX_E2E_CLI_BIN`. Its JSON-line harness retains early events and
+reports only process metadata on failures. Teardown bounds shutdown of each
+fixture-owned process. The packaged Electron restart test remains macOS-only;
+on Windows it is explicitly skipped rather than treated as verified coverage.
+
 The same discipline as production source applies:
 
 - No `as any` / `as unknown` / `as Type` / `: any`. Same as production.

@@ -5,9 +5,11 @@ import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 
+import { readProtectedConfig, writeProtectedConfig } from './protected-config'
+import type { JsonValue } from '@/electron/service-bridge/json-rpc-subprocess'
 import type { CodexConfig } from '@/shared/types/codex'
 
-export const CODEX_CONFIG_SCHEMA_VERSION = 1 as const
+const CODEX_CONFIG_SCHEMA_VERSION = 1
 export const CODEX_REGISTRATION_NAME = 'pair-codex-supervisor'
 
 export function defaultCodexConfig(): CodexConfig {
@@ -39,26 +41,25 @@ export function codexRuntimeDescriptorPath(userDataRoot: string): string {
 }
 
 export function loadCodexConfig(filePath: string): CodexConfig {
-    if (!fs.existsSync(filePath)) return defaultCodexConfig()
-    const raw = fs.readFileSync(filePath, 'utf8')
-    const parsed: unknown = JSON.parse(raw)
+    const raw = readProtectedConfig(filePath)
+    if (raw === null) return defaultCodexConfig()
+    const parsed: JsonValue = JSON.parse(raw)
     return validateCodexConfig(parsed)
 }
 
 export function saveCodexConfig(filePath: string, config: CodexConfig): void {
-    const validated = validateCodexConfig(config)
+    const validated = validateCodexConfig({ ...config })
     const directory = path.dirname(filePath)
-    fs.mkdirSync(directory, { recursive: true, mode: 0o700 })
-    if (fs.existsSync(filePath)) {
-        const backup = `${filePath}.bak-${Date.now()}`
-        fs.copyFileSync(filePath, backup)
-        try {
-            fs.chmodSync(backup, 0o600)
-        } catch {
-            // chmod is best effort on platforms without POSIX modes.
-        }
+    const previous = readProtectedConfig(filePath)
+    if (previous !== null) {
+        const backup = `${filePath}.bak-${crypto.randomUUID()}`
+        writeProtectedConfig(backup, previous)
         for (const name of fs.readdirSync(directory)) {
-            if (!name.startsWith(`${path.basename(filePath)}.bak-`) || name === path.basename(backup)) continue
+            if (
+                !name.startsWith(`${path.basename(filePath)}.bak-`) ||
+                name === path.basename(backup)
+            )
+                continue
             try {
                 fs.unlinkSync(path.join(directory, name))
             } catch {
@@ -66,28 +67,14 @@ export function saveCodexConfig(filePath: string, config: CodexConfig): void {
             }
         }
     }
-    const temporary = path.join(directory, `.${path.basename(filePath)}.${crypto.randomUUID()}.tmp`)
-    const data = `${JSON.stringify(validated, null, 2)}\n`
-    const fd = fs.openSync(temporary, 'w', 0o600)
-    try {
-        fs.writeFileSync(fd, data, 'utf8')
-        fs.fsyncSync(fd)
-    } finally {
-        fs.closeSync(fd)
-    }
-    try {
-        fs.chmodSync(temporary, 0o600)
-    } catch {
-        // chmod is best effort on platforms without POSIX modes.
-    }
-    fs.renameSync(temporary, filePath)
+    writeProtectedConfig(filePath, `${JSON.stringify(validated, null, 2)}\n`)
 }
 
-export function validateCodexConfig(value: unknown): CodexConfig {
+function validateCodexConfig(value: JsonValue): CodexConfig {
     if (!value || typeof value !== 'object' || Array.isArray(value)) {
         throw new Error('Codex config must be an object')
     }
-    const record = value as Record<string, unknown>
+    const record = value
     const allowed = new Set([
         'schemaVersion',
         'enabled',
@@ -104,7 +91,8 @@ export function validateCodexConfig(value: unknown): CodexConfig {
     for (const key of Object.keys(record)) {
         if (!allowed.has(key)) throw new Error(`Unknown Codex config field: ${key}`)
     }
-    if (record.schemaVersion !== CODEX_CONFIG_SCHEMA_VERSION) throw new Error('Unsupported Codex config schema')
+    if (record.schemaVersion !== CODEX_CONFIG_SCHEMA_VERSION)
+        throw new Error('Unsupported Codex config schema')
     if (typeof record.enabled !== 'boolean') throw new Error('Codex config enabled must be boolean')
     if (typeof record.workspaceRoot !== 'string' || typeof record.stateRoot !== 'string') {
         throw new Error('Codex config paths must be strings')
@@ -121,11 +109,27 @@ export function validateCodexConfig(value: unknown): CodexConfig {
     if (typeof record.workerInstanceId !== 'string' || !record.workerInstanceId) {
         throw new Error('Codex workerInstanceId is required')
     }
-    if (typeof record.policyRevision !== 'number' || !Number.isInteger(record.policyRevision) || record.policyRevision <= 0) {
+    if (
+        typeof record.policyRevision !== 'number' ||
+        !Number.isInteger(record.policyRevision) ||
+        record.policyRevision <= 0
+    ) {
         throw new Error('Codex policyRevision must be a positive integer')
     }
     if (record.registrationName !== CODEX_REGISTRATION_NAME) {
         throw new Error('Unsupported Codex registration name')
     }
-    return record as unknown as CodexConfig
+    return {
+        schemaVersion: CODEX_CONFIG_SCHEMA_VERSION,
+        enabled: record.enabled,
+        workspaceRoot: record.workspaceRoot,
+        stateRoot: record.stateRoot,
+        codexExecutable: record.codexExecutable,
+        account: record.account,
+        policyCeiling: record.policyCeiling,
+        installationId: record.installationId,
+        workerInstanceId: record.workerInstanceId,
+        policyRevision: record.policyRevision,
+        registrationName: CODEX_REGISTRATION_NAME
+    }
 }

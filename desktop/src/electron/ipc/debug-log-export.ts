@@ -12,7 +12,8 @@ import { MODULAR_DEFAULT_LOG_LEVEL } from '@/shared/constants/modular-runtime'
 import { getStructuredLogFilePath } from '@/shared/utils/log'
 import { currentPlatform } from '@/shared/utils/platform'
 import { getModularBridgeState } from '@/electron/service-bridge/modular-state'
-import { getCliBinDir, getModularSupervisor } from '@/electron/service-bridge/modular-supervisor'
+import { getCliBinDir } from '@/electron/cli-bin'
+import { getModularSupervisor } from '@/electron/service-bridge/modular-supervisor'
 
 const SESSION_STARTED_AT = new Date(Date.now() - process.uptime() * 1000)
 

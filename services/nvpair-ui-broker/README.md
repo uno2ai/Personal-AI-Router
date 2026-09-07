@@ -5,6 +5,28 @@ SPDX-License-Identifier: Apache-2.0
 
 # nvpair-ui-broker
 
+## Protected Desktop configuration helper
+
+The bundled broker also accepts a one-shot operation before starting logging,
+worker supervision, or JSON-RPC: `--protected-file read|read-owned-input|write
+--protected-path <absolute-path>`. The caller passes write bytes on stdin; only
+successful reads return bytes on stdout. Input and output are limited to 4 MiB.
+Exit 0 means success, exit 3 means a read target is absent, and exit 1 reports a
+fixed diagnostic without file contents or paths. Desktop bounds each invocation
+to 15 seconds and requires its bundled broker; rebuild or reinstall if missing.
+
+`read` requires a protected managed file. `read-owned-input` is restricted by
+Desktop to external Main Codex configuration: it checks the opened file's owner
+and rejects final links without changing existing permissions. On Windows both
+reads pin all ancestors and reject intermediate reparse points. This external
+input operation does not assert privacy and must never replace managed-secret
+reads. Writes atomically publish a file staged with private permissions before
+bytes are written. Existing parent permissions remain unchanged; missing
+directories are created privately. Desktop stages backups through the same
+writer before updating Main Codex configuration and preserves unrelated entries.
+
+This helper adds no JSON-RPC surface and launches no workers.
+
 A Go service that exposes the NVIDIA Personal AI Router API to **UI processes**
 and other clients (CLIs, dashboards, mobile companions, scripts, tests, etc.).
 The shipped graphical UI is bundled alongside the backend services and launches

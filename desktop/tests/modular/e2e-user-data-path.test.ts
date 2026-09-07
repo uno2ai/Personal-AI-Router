@@ -24,7 +24,7 @@ describe('packaged Codex E2E userData override', () => {
         const outside = fs.mkdtempSync(path.join(path.dirname(os.tmpdir()), 'pair-e2e-outside-'))
         const link = path.join(root, 'escape')
         try {
-            fs.symlinkSync(outside, link)
+            fs.symlinkSync(outside, link, process.platform === 'win32' ? 'junction' : 'dir')
             expect(() => resolveCodexE2EUserData(true, outside, os.tmpdir())).toThrow(
                 'must resolve beneath the OS temporary directory'
             )

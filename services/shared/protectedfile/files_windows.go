@@ -172,6 +172,25 @@ func Open(path string) (*File, error) {
 	return f, nil
 }
 
+// OpenOwnedInput reads external, user-owned input without asserting privacy or
+// changing its ACL. It is not suitable for managed secrets. Like Open it pins
+// ancestors and rejects reparse points, and checks the actual opened owner.
+func OpenOwnedInput(path string) (*File, error) {
+	f, err := openCheckedPath(path, windows.GENERIC_READ|windows.READ_CONTROL, windows.FILE_OPEN, windows.FILE_NON_DIRECTORY_FILE, nil)
+	if err != nil {
+		return nil, err
+	}
+	sd, err := securityForHandle(windows.Handle(f.Fd()))
+	if err == nil {
+		err = checkOwner(sd)
+	}
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
 // OpenAppend requires an existing file to already be private. Narrowing an ACL
 // cannot revoke data handles previously obtained by another user.
 func OpenAppend(path string) (*File, error) {
@@ -305,4 +324,10 @@ func WriteFile(path string, data []byte) error {
 		return fmt.Errorf("publish protected file: %w", err)
 	}
 	return file.Close()
+}
+
+// WriteFilePreservingParent writes a private Desktop configuration file without
+// changing existing containing-directory permissions.
+func WriteFilePreservingParent(path string, data []byte) error {
+	return WriteFile(path, data)
 }
