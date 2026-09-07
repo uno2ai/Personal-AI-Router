@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Codex Desktop Integration Design
 
 **Status:** Personal-use macOS arm64 implementation and acceptance complete; Windows/Linux native validation is excluded

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 import { create } from 'zustand'
 
 import type { CodexDesktopState, CodexTaskMetadata, CodexTaskReference, CodexWorkerConfigInput } from '@/shared/types/codex'
