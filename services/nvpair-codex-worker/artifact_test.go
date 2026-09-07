@@ -57,31 +57,43 @@ func TestArtifactStoreRejectsPathEscapeSymlinkAndOversize(t *testing.T) {
 	if err := os.MkdirAll(outside, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("secret"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("s"), 0o600); err != nil {
 		t.Fatal(err)
-	}
-	if err := os.Symlink(outside, filepath.Join(workspace, "linked")); err != nil {
-		t.Skipf("symlink unavailable: %v", err)
 	}
 	store, err := NewArtifactStore(filepath.Join(root, "artifacts"), 4)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"../secret.txt", "/tmp/secret.txt", "linked/secret.txt"} {
+	checkUnsafe := func(t *testing.T, name string) {
+		t.Helper()
 		handoff := validArtifactHandoff(name)
-		if err := store.StageHandoff("task-1", workspace, &handoff); err == nil {
-			t.Errorf("artifact %q was accepted", name)
-		} else if !errors.Is(err, ErrUnsafeArtifactPath) && !strings.Contains(err.Error(), "artifact") {
-			t.Errorf("artifact %q returned unrelated error: %v", name, err)
+		if err := store.StageHandoff("task-1", workspace, &handoff); !errors.Is(err, ErrUnsafeArtifactPath) {
+			t.Errorf("artifact %q error=%v, want unsafe artifact path", name, err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(workspace, "large.txt"), []byte("12345"), 0o600); err != nil {
-		t.Fatal(err)
+	for label, name := range map[string]string{
+		"traversal":      "../secret.txt",
+		"absolute":       filepath.Join(outside, "secret.txt"),
+		"slash_absolute": "/tmp/secret.txt",
+	} {
+		t.Run(label, func(t *testing.T) { checkUnsafe(t, name) })
 	}
-	handoff := validArtifactHandoff("large.txt")
-	if err := store.StageHandoff("task-1", workspace, &handoff); err == nil || !errors.Is(err, ErrArtifactTooLarge) {
-		t.Fatalf("oversize artifact error=%v", err)
-	}
+	t.Run("directory_link", func(t *testing.T) {
+		makeTestDirectoryLink(t, filepath.Join(workspace, "linked"), outside)
+		handoff := validArtifactHandoff("linked/secret.txt")
+		if err := store.StageHandoff("task-1", workspace, &handoff); err == nil || !strings.Contains(err.Error(), "workspace path contains symlink component") {
+			t.Fatalf("directory link artifact error=%v, want link rejection", err)
+		}
+	})
+	t.Run("oversize", func(t *testing.T) {
+		if err := os.WriteFile(filepath.Join(workspace, "large.txt"), []byte("12345"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		handoff := validArtifactHandoff("large.txt")
+		if err := store.StageHandoff("task-1", workspace, &handoff); !errors.Is(err, ErrArtifactTooLarge) {
+			t.Fatalf("oversize artifact error=%v", err)
+		}
+	})
 }
 
 func TestArtifactStorePrunesOnlyExpiredTaskDirectories(t *testing.T) {

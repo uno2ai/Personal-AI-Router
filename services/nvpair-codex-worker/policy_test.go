@@ -17,18 +17,27 @@ func TestWorkspacePolicyRejectsTraversalAndSymlinkEscape(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("secret"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(outside, filepath.Join(root, "linked")); err != nil {
-		t.Skipf("symlink unavailable: %v", err)
-	}
 	policy, err := NewWorkspacePolicy(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{"../secret", "linked/secret.txt", "/tmp/outside"} {
+	checkUnsafe := func(t *testing.T, path string) {
+		t.Helper()
 		if _, err := policy.Resolve(codexprotocol.WorkspaceSpec{ID: "local", Path: path, Mode: "read"}); err == nil {
 			t.Errorf("Resolve(%q) accepted an unsafe path", path)
 		}
 	}
+	for label, path := range map[string]string{
+		"traversal":      "../secret",
+		"absolute":       filepath.Join(outside, "secret.txt"),
+		"slash_absolute": "/tmp/outside",
+	} {
+		t.Run(label, func(t *testing.T) { checkUnsafe(t, path) })
+	}
+	t.Run("directory_link", func(t *testing.T) {
+		makeTestDirectoryLink(t, filepath.Join(root, "linked"), outside)
+		checkUnsafe(t, "linked/secret.txt")
+	})
 }
 
 func TestWorkspacePolicyResolvesOnlyConfiguredLocalAlias(t *testing.T) {
