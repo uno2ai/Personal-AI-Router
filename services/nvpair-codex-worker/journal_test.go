@@ -80,3 +80,14 @@ func TestJournalRepairsCompleteFinalRecordDelimiter(t *testing.T) {
 		t.Fatalf("appended entries=%+v err=%v", entries, err)
 	}
 }
+
+func TestJournalCreatesMissingParentBeforeLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "new-state", "nested", "tasks.jsonl")
+	journal, err := NewJournal(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := journal.Close(); err != nil {
+		t.Fatal(err)
+	}
+}

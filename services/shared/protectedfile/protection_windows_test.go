@@ -56,7 +56,7 @@ func TestWindowsProtectionRejectsBroadACLs(t *testing.T) {
 		t.Fatal(err)
 	}
 }
-func TestWindowsProtectionInheritedBeforeWrite(t *testing.T) {
+func TestWindowsPrivateCreationBeforeWrite(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "private", "nested")
 	if err := EnsureDir(root); err != nil {
 		t.Fatal(err)
@@ -66,12 +66,12 @@ func TestWindowsProtectionInheritedBeforeWrite(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	file, err := os.CreateTemp(root, "child-*")
+	file, err := CreateTemp(root, "child-*")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer file.Close()
-	// Even an empty file must inherit private access before any secret is written.
+	// Private creation must disable inheritance before any secret is written.
 	if err := Check(file.Name()); err != nil {
 		t.Fatal(err)
 	}
@@ -329,5 +329,67 @@ func TestWindowsMissingProtectedFileRetainsNotExistError(t *testing.T) {
 			file.Close()
 		}
 		t.Fatalf("missing file lost os.ErrNotExist: %v", err)
+	}
+}
+
+func setTestDACL(t *testing.T, path, sddl string, flags windows.SECURITY_INFORMATION) {
+	t.Helper()
+	sd, err := windows.SecurityDescriptorFromString(sddl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acl, _, err := sd.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|flags, nil, nil, acl, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+func TestWindowsAppendRequiresProtectedDACLBeforeParentCanChange(t *testing.T) {
+	directory := t.TempDir()
+	sid, err := currentSID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	setTestDACL(t, directory, "D:P(A;;FA;;;"+sid+")(A;;WD;;;WD)", windows.PROTECTED_DACL_SECURITY_INFORMATION)
+	path := filepath.Join(directory, "journal")
+	if err := os.WriteFile(path, []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Presently private, but the parent can still propagate a future broad ACE.
+	setTestDACL(t, path, "D:(A;;FA;;;"+sid+")", windows.UNPROTECTED_DACL_SECURITY_INFORMATION)
+	if file, err := OpenAppend(path); err == nil {
+		file.Close()
+		t.Error("accepted non-protected existing DACL")
+	}
+	if file, err := Open(path); err == nil {
+		file.Close()
+		t.Error("reader accepted non-protected existing DACL")
+	}
+	if err := Check(path); err == nil {
+		t.Error("Check accepted non-protected existing DACL")
+	}
+	// A fresh staged file carries SE_DACL_PROTECTED and remains private while open.
+	if err := WriteFile(path, []byte("original")); err != nil {
+		t.Fatal(err)
+	}
+	file, err := OpenAppend(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	setTestDACL(t, directory, "D:P(A;;FA;;;"+sid+")(A;OICI;FA;;;WD)", windows.PROTECTED_DACL_SECURITY_INFORMATION)
+	if err := checkHandle(windows.Handle(file.Fd())); err != nil {
+		t.Fatalf("parent ACL changed protected file: %v", err)
+	}
+	if _, err := file.Write([]byte("-future")); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := Check(path); err != nil {
+		t.Fatal(err)
 	}
 }

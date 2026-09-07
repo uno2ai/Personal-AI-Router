@@ -8,12 +8,18 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"syscall"
+
+	"nvpair-shared/protectedfile"
 )
 
 type taskIndexLock struct{ file *os.File }
 
 func acquireTaskIndexLock(path string) (*taskIndexLock, error) {
+	if err := protectedfile.EnsureDir(filepath.Dir(path)); err != nil {
+		return nil, fmt.Errorf("prepare lock directory: %w", err)
+	}
 	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open task index lock: %w", err)

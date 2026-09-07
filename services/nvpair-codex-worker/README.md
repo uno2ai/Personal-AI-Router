@@ -47,7 +47,9 @@ and `0600` files. Managed configuration and credential readers inspect the actua
 and reject access from other identities. Windows protected I/O pins traversal
 directories and rejects junctions before reading, writing, or publishing files;
 public traversal ancestors are not changed. Existing journals must already be
-private, because tightening an ACL cannot revoke previously opened data handles.
+private with DACL inheritance disabled, because tightening an ACL cannot revoke
+previously opened data handles. Protected Windows readers also require disabled
+DACL inheritance so later changes to an ancestor cannot expose an open file.
 A launcher must use the protected writer before writing its bearer token.
 Windows app-server children start suspended and join a kill-on-close job before
 running; descendants terminate when their Worker-owned job closes. Journal and

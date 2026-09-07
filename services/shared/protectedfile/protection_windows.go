@@ -47,6 +47,13 @@ func checkSecurity(sd *windows.SECURITY_DESCRIPTOR) error {
 	if err := checkOwner(sd); err != nil {
 		return err
 	}
+	control, _, err := sd.Control()
+	if err != nil {
+		return err
+	}
+	if control&windows.SE_DACL_PROTECTED == 0 {
+		return errors.New("protected file DACL must disable inheritance")
+	}
 	current, err := currentSID()
 	if err != nil {
 		return err

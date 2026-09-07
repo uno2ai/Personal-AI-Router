@@ -150,18 +150,18 @@ func (s *ArtifactStore) Read(taskID, artifactID string) ([]byte, error) {
 	if !containedPath(s.root, path) {
 		return nil, ErrArtifactNotFound
 	}
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+	file, err := protectedfile.Open(path)
+	if err != nil {
+		return nil, ErrArtifactNotFound
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
 		return nil, ErrArtifactNotFound
 	}
 	if info.Size() > s.maxBytes {
 		return nil, ErrArtifactTooLarge
 	}
-	file, err := openArtifactSource(path)
-	if err != nil {
-		return nil, ErrArtifactNotFound
-	}
-	defer file.Close()
 	data, err := io.ReadAll(io.LimitReader(file, s.maxBytes+1))
 	if err != nil {
 		return nil, err

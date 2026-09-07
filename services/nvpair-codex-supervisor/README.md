@@ -66,7 +66,8 @@ Windows firewall.
 The local Worker credential must permit access only to the current user, SYSTEM,
 and Administrators. The Supervisor validates ACLs on the actual opened file
 handle and retains its directory handles while reading, rather than checking a
-mutable path and reopening it. Broad or missing DACLs and reparse traversal are
-rejected. New task-index files are private at creation; existing broad or
+mutable path and reopening it. Broad, missing, or inheritance-enabled DACLs and
+reparse traversal are rejected. Disabling DACL inheritance prevents a later
+ancestor ACL change from exposing an already-open file. New task-index files are private at creation; existing broad or
 hard-linked index files are rejected before append. Unix group/world checks
 remain enforced and existing Unix traversal parents are not changed.
