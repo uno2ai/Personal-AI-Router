@@ -51,6 +51,11 @@ private with DACL inheritance disabled, because tightening an ACL cannot revoke
 previously opened data handles. Protected Windows readers also require disabled
 DACL inheritance so later changes to an ancestor cannot expose an open file.
 A launcher must use the protected writer before writing its bearer token.
+Isolated Windows app-server children explicitly select Codex's `unelevated`
+restricted-token sandbox, since their private Codex home omits Main's settings.
+Read/write ceilings and approval handling remain enforced. This mode avoids
+machine-wide elevated sandbox setup; it has weaker network isolation than
+Codex's elevated sandbox and uses the native sandbox's offline controls.
 Windows app-server children start suspended and join a kill-on-close job before
 running; descendants terminate when their Worker-owned job closes. Journal and
 workspace locks retain Windows thread ownership across asynchronous callbacks.

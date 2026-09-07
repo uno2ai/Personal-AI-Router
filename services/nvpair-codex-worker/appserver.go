@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -76,6 +77,13 @@ func (f AppServerFactory) command() (*exec.Cmd, error) {
 	cmd := exec.Command(binary, appServerArguments()...)
 	if f.isolatedHome == nil {
 		return cmd, nil
+	}
+	if runtime.GOOS == "windows" {
+		// The isolated home intentionally omits Main's configuration. Select a
+		// native restricted-token sandbox so Codex can enforce the task policy
+		// without requiring machine-wide elevated sandbox setup. This does not
+		// change the read/write ceiling or approve an escalation request.
+		cmd.Args = append(cmd.Args, "-c", `windows.sandbox="unelevated"`)
 	}
 	if err := f.isolatedHome.prepare(); err != nil {
 		return nil, err

@@ -12,6 +12,8 @@ import (
 	"nvpair-shared/protectedfile"
 	"os"
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -414,5 +416,32 @@ func TestAppServerCompletionRacingTurnStartIsCorrelatedAndReplayed(t *testing.T)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for correlated completion")
+	}
+}
+
+func TestIsolatedAppServerSelectsNativeWindowsSandbox(t *testing.T) {
+	t.Setenv("CODEX_HOME", t.TempDir())
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	command, err := NewAppServerFactory(binary, t.TempDir()).command()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := append([]string{binary}, appServerArguments()...)
+	expected := append([]string{}, base...)
+	if runtime.GOOS == "windows" {
+		expected = append(expected, "-c", `windows.sandbox="unelevated"`)
+	}
+	if !reflect.DeepEqual(command.Args, expected) {
+		t.Fatalf("isolated app-server args=%q, want %q", command.Args, expected)
+	}
+	plain, err := NewAppServerFactory(binary).command()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(plain.Args, base) {
+		t.Fatalf("non-isolated app-server args=%q, want %q", plain.Args, base)
 	}
 }

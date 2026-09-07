@@ -366,8 +366,26 @@ describe('packaged Codex Desktop native contract', () => {
                 'native read-only task result'
             )
             if (terminalState !== 'completed') {
+                const entries = fs
+                    .readFileSync(path.join(state, 'tasks.jsonl'), 'utf8')
+                    .trim()
+                    .split('\n')
+                    .slice(-16)
+                    .map(parseNativeObject)
+                const metadata = entries.map(entry => {
+                    const record = isNativeObject(entry.record) ? entry.record : {}
+                    const event = isNativeObject(entry.event) ? entry.event : {}
+                    return {
+                        sequence: entry.sequence,
+                        kind: entry.kind,
+                        state: record.state,
+                        childStarted: typeof record.childIdentity === 'string',
+                        threadStarted: typeof record.threadId === 'string',
+                        eventKind: event.kind
+                    }
+                })
                 throw new Error(
-                    `native read-only task did not complete; taskId=${task.taskId}; ${workerLines?.diagnostics() ?? 'worker unavailable'}`
+                    `native read-only task did not complete; taskId=${task.taskId}; state=${terminalState}; journal=${JSON.stringify(metadata)}; ${workerLines?.diagnostics() ?? 'worker unavailable'}`
                 )
             }
             expect(terminalState).toBe('completed')
