@@ -29,11 +29,11 @@ Files: services/shared (new focused Windows/Unix protection helpers if needed), 
 
 Files: desktop/src/electron/codex/config-store.ts, codex-manager.ts, mcp-registration.ts; desktop/tests/modular/codex-config.test.ts, e2e-user-data-path.test.ts; desktop/tests/e2e/codex-desktop.e2e.test.ts; relevant Windows testing documentation.
 
-- [ ] Reproduce unit failures on supported Node; confirm Go protection interface from Task 1 before choosing how desktop config is secured.
-- [ ] Use native directory ACL protection for Windows secret/config writes, with failing regression coverage; retain Unix permission checks.
-- [ ] Test symlink escape via Windows directory junctions when symlink privilege is absent; only skip an unavailable capability with an explicit reason, never skip the path-security assertion silently.
-- [ ] Make native E2E report actionable control errors without printing secrets or task output, and clean up processes with bounded waits.
-- [ ] Run unit tests, typecheck, lint, contracts and dead-code checks; distinguish pre-existing issues.
+- [x] Reproduce unit failures on supported Node; confirm Go protection interface from Task 1 before choosing how desktop config is secured.
+- [x] Use native directory ACL protection for Windows secret/config writes, with failing regression coverage; retain Unix permission checks.
+- [x] Test symlink escape via Windows directory junctions when symlink privilege is absent; only skip an unavailable capability with an explicit reason, never skip the path-security assertion silently.
+- [x] Make native E2E report actionable control errors without printing secrets or task output, and clean up processes with bounded waits.
+- [x] Run unit tests, typecheck, lint, contracts and dead-code checks; distinguish pre-existing issues.
 
 ## Task 3: Discovery isolation, end-to-end verification and publication
 
@@ -42,5 +42,23 @@ Files: services/tests discovery/network fixtures only where evidence warrants; d
 - [x] Reproduce discovery independently of PAIR with a minimal zeroconf probe and inspect active adapters/firewall rules read-only.
 - [x] Distinguish mDNS transport availability from application handling; do not weaken firewall policy or increase timeouts. Any code fix needs a regression test first.
 - [x] Apply required component patch bumps for changed compiled output.
-- [ ] Run all Go modules with verbose skip accounting, all requested Desktop checks, Windows x64 package build, and packaged native Codex E2E. Retain logs from every attempt.
-- [ ] Review complete diff independently, resolve findings, redact shared logs, and commit/push the repair branch for user macOS review. Do not merge main.
+- [x] Run all Go modules with verbose skip accounting, all requested Desktop checks, Windows x64 package build, and packaged native Codex E2E. Retain logs from every attempt.
+- [x] Review complete diff independently, resolve findings, redact shared logs, and commit/push the repair branch for user macOS review. Do not merge main.
+
+## Completion evidence
+
+Final verified source: `7e3e00cdc044565044f24aa8f269e0fcfcc95895`.
+All 18 Go modules pass (1,243 top-level passes, 13 explicit skips); Desktop
+has 238 passes and 2 skips, with all static gates passing. Windows x64 packaging
+and the actual packaged Worker/Supervisor Codex task pass (2 E2E passes,
+1 macOS-only skip). All nine original discovery failures pass unchanged.
+
+Native integration exposed one additional Windows issue: isolated app-server
+startup omitted the native sandbox selection. Windows now selects the
+restricted-token sandbox explicitly while retaining task limits and approval
+handling; Unix argv behavior is unchanged and was executed under WSL.
+The complete source and both final correction ranges received independent
+review with no remaining Critical/Important findings. The evidence-only
+closeout commit contains the [report and redacted archive](../../validation/windows-runtime-fixes/README.md).
+Main merge, native macOS regression and Windows manual GUI confirmation remain
+with the maintainer.
