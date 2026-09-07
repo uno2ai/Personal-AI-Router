@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -69,7 +68,7 @@ type taskIndexEntry struct {
 
 type TaskIndex struct {
 	mu       sync.Mutex
-	file     *os.File
+	file     *protectedfile.File
 	lock     *taskIndexLock
 	path     string
 	sequence uint64
@@ -81,23 +80,17 @@ func OpenTaskIndex(path string) (*TaskIndex, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, errors.New("task index path is required")
 	}
-	if err := protectedfile.EnsureDir(filepath.Dir(path)); err != nil {
-		return nil, fmt.Errorf("create task index directory: %w", err)
-	}
+
 	lock, err := acquireTaskIndexLock(path)
 	if err != nil {
 		return nil, err
 	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	file, err := protectedfile.OpenAppend(path)
 	if err != nil {
 		_ = releaseTaskIndexLock(lock)
 		return nil, fmt.Errorf("open task index: %w", err)
 	}
-	if err := protectedfile.Protect(path); err != nil {
-		file.Close()
-		releaseTaskIndexLock(lock)
-		return nil, err
-	}
+
 	entries, err := readTaskIndex(path)
 	if err != nil {
 		_ = file.Close()

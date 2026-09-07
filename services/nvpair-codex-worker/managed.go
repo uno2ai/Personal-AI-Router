@@ -104,14 +104,7 @@ func (c managedWorkerConfig) Validate() error {
 }
 
 func readManagedConfig(path string) (managedWorkerConfig, error) {
-	if err := protectedfile.Check(filepath.Dir(path)); err != nil {
-		return managedWorkerConfig{}, fmt.Errorf("unprotected containing directory: %w", err)
-	}
-	if err := protectedfile.Check(path); err != nil {
-		return managedWorkerConfig{}, fmt.Errorf("unprotected managed Worker config: %w", err)
-	}
-
-	file, err := os.Open(path)
+	file, err := protectedfile.Open(path)
 	if err != nil {
 		return managedWorkerConfig{}, fmt.Errorf("open managed Worker config: %w", err)
 	}
@@ -282,10 +275,7 @@ func startManagedWorker(config managedWorkerConfig) (*managedWorkerController, e
 		writeManagedUnavailableDescriptor(config, err)
 		return nil, fmt.Errorf("create Worker workspace: %w", err)
 	}
-	if err := protectedfile.EnsureDir(config.StateRoot); err != nil {
-		writeManagedUnavailableDescriptor(config, err)
-		return nil, fmt.Errorf("create Worker state root: %w", err)
-	}
+
 	policy, err := NewWorkspacePolicy(config.WorkspaceRoot)
 	if err != nil {
 		writeManagedUnavailableDescriptor(config, err)
@@ -487,9 +477,7 @@ func (c *managedWorkerController) Stop() error {
 }
 
 func writeManagedCredential(path, token, fingerprint string, generation uint64) error {
-	if err := protectedfile.EnsureDir(filepath.Dir(path)); err != nil {
-		return fmt.Errorf("create credential directory: %w", err)
-	}
+
 	data, err := json.Marshal(struct {
 		BearerToken             string `json:"bearerToken"`
 		ServerCertificateSHA256 string `json:"serverCertificateSha256"`

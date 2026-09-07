@@ -130,35 +130,7 @@ func syncCodexAuth(isolatedHome string) error {
 	if err != nil {
 		return fmt.Errorf("read Codex authentication: %w", err)
 	}
-	temporary, err := os.CreateTemp(isolatedHome, ".auth-*.tmp")
-	if err != nil {
-		return fmt.Errorf("stage isolated Codex authentication: %w", err)
-	}
-	temporaryPath := temporary.Name()
-	committed := false
-	defer func() {
-		_ = temporary.Close()
-		if !committed {
-			_ = os.Remove(temporaryPath)
-		}
-	}()
-	if err := protectedfile.Protect(temporary.Name()); err != nil {
-		return fmt.Errorf("protect staged Codex authentication: %w", err)
-	}
-	if _, err := temporary.Write(data); err != nil {
-		return fmt.Errorf("write staged Codex authentication: %w", err)
-	}
-	if err := temporary.Sync(); err != nil {
-		return fmt.Errorf("sync staged Codex authentication: %w", err)
-	}
-	if err := temporary.Close(); err != nil {
-		return fmt.Errorf("close staged Codex authentication: %w", err)
-	}
-	if err := os.Rename(temporaryPath, destination); err != nil {
-		return fmt.Errorf("install isolated Codex authentication: %w", err)
-	}
-	committed = true
-	return nil
+	return protectedfile.WriteFile(destination, data)
 }
 
 func replaceEnvironment(environment []string, replacements map[string]string) []string {

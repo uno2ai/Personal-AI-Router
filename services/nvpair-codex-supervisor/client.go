@@ -16,8 +16,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -114,13 +112,7 @@ func NewPinnedLocalWorkerClient(rawURL, credentialPath, expectedCertificateSHA25
 }
 
 func readLocalWorkerCredential(path string) (localWorkerCredential, error) {
-	if err := protectedfile.Check(filepath.Dir(path)); err != nil {
-		return localWorkerCredential{}, fmt.Errorf("unprotected containing directory: %w", err)
-	}
-	if err := protectedfile.Check(path); err != nil {
-		return localWorkerCredential{}, fmt.Errorf("unprotected local Worker credential: %w", err)
-	}
-	file, err := os.Open(path)
+	file, err := protectedfile.Open(path)
 	if err != nil {
 		return localWorkerCredential{}, fmt.Errorf("open local Worker credential: %w", err)
 	}

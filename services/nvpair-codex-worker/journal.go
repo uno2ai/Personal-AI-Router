@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 
@@ -31,7 +30,7 @@ type journalEntry struct {
 
 type Journal struct {
 	mu       sync.Mutex
-	file     *os.File
+	file     *protectedfile.File
 	lockFile *journalLockHandle
 	path     string
 	sequence uint64
@@ -42,23 +41,17 @@ func NewJournal(path string) (*Journal, error) {
 	if path == "" {
 		return nil, errors.New("journal path is required")
 	}
-	if err := protectedfile.EnsureDir(filepath.Dir(path)); err != nil {
-		return nil, fmt.Errorf("create journal directory: %w", err)
-	}
+
 	lockFile, err := acquireJournalLock(path)
 	if err != nil {
 		return nil, err
 	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	file, err := protectedfile.OpenAppend(path)
 	if err != nil {
 		_ = releaseJournalLock(lockFile)
 		return nil, fmt.Errorf("open journal: %w", err)
 	}
-	if err := protectedfile.Protect(path); err != nil {
-		file.Close()
-		releaseJournalLock(lockFile)
-		return nil, err
-	}
+
 	entries, err := readJournal(path)
 	if err != nil {
 		_ = file.Close()

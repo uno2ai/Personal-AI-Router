@@ -93,13 +93,13 @@ func (s *ArtifactStore) StageHandoff(taskID, workspace string, handoff *codexpro
 			_ = input.Close()
 			return err
 		}
-		tmpPath := filepath.Join(taskDir, "."+id+".tmp")
 		finalPath := filepath.Join(taskDir, id)
-		output, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		output, err := protectedfile.CreateTemp(taskDir, "."+id+".tmp-*")
 		if err != nil {
 			_ = input.Close()
 			return fmt.Errorf("create staged artifact: %w", err)
 		}
+		tmpPath := output.Name()
 		hash := sha256.New()
 		written, copyErr := io.Copy(io.MultiWriter(output, hash), io.LimitReader(input, s.maxBytes+1))
 		closeInErr := input.Close()
@@ -107,26 +107,29 @@ func (s *ArtifactStore) StageHandoff(taskID, workspace string, handoff *codexpro
 		if copyErr == nil {
 			syncErr = output.Sync()
 		}
-		closeOutErr := output.Close()
+		cleanupStage := func() { _ = output.Close(); _ = os.Remove(tmpPath) }
 		if copyErr != nil {
-			_ = os.Remove(tmpPath)
+			cleanupStage()
 			return fmt.Errorf("copy artifact: %w", copyErr)
 		}
 		if syncErr != nil {
-			_ = os.Remove(tmpPath)
+			cleanupStage()
 			return fmt.Errorf("sync staged artifact: %w", syncErr)
 		}
-		if closeInErr != nil || closeOutErr != nil {
-			_ = os.Remove(tmpPath)
-			return fmt.Errorf("close artifact staging file: input=%v output=%v", closeInErr, closeOutErr)
+		if closeInErr != nil {
+			cleanupStage()
+			return fmt.Errorf("close artifact input: %w", closeInErr)
 		}
 		if written > s.maxBytes {
-			_ = os.Remove(tmpPath)
+			cleanupStage()
 			return fmt.Errorf("%w: %d bytes", ErrArtifactTooLarge, written)
 		}
-		if err := os.Rename(tmpPath, finalPath); err != nil {
-			_ = os.Remove(tmpPath)
+		if err := output.Publish(finalPath); err != nil {
+			cleanupStage()
 			return fmt.Errorf("commit staged artifact: %w", err)
+		}
+		if err := output.Close(); err != nil {
+			return fmt.Errorf("close staged artifact: %w", err)
 		}
 		if err := syncDirectory(taskDir); err != nil {
 			return fmt.Errorf("sync staged artifact directory: %w", err)

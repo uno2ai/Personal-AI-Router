@@ -4,6 +4,7 @@
 package main
 
 import (
+	"nvpair-shared/protectedfile"
 	"os"
 	"path/filepath"
 	"testing"
@@ -11,7 +12,7 @@ import (
 
 func TestJournalReplaysOnlyIncompleteFinalTail(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tasks.jsonl")
-	if err := os.WriteFile(path, []byte(`{"version":1,"sequence":1,"kind":"accept","requestId":"r","record":{}}`+"\n"+`{"version":1,"sequence":2,"kind":"mutate"`), 0o600); err != nil {
+	if err := protectedfile.WriteFile(path, []byte(`{"version":1,"sequence":1,"kind":"accept","requestId":"r","record":{}}`+"\n"+`{"version":1,"sequence":2,"kind":"mutate"`)); err != nil {
 		t.Fatal(err)
 	}
 	entries, err := readJournal(path)
@@ -39,7 +40,7 @@ func TestJournalReplaysOnlyIncompleteFinalTail(t *testing.T) {
 
 func TestJournalRejectsMalformedCompleteRecord(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tasks.jsonl")
-	if err := os.WriteFile(path, []byte(`{"version":1,"sequence":1,"kind":"accept",}`+"\n"), 0o600); err != nil {
+	if err := protectedfile.WriteFile(path, []byte(`{"version":1,"sequence":1,"kind":"accept",}`+"\n")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := readJournal(path); err == nil {
@@ -50,7 +51,7 @@ func TestJournalRejectsMalformedCompleteRecord(t *testing.T) {
 func TestJournalRepairsCompleteFinalRecordDelimiter(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tasks.jsonl")
 	line := `{"version":1,"sequence":1,"kind":"accept","requestId":"r","record":{}}`
-	if err := os.WriteFile(path, []byte(line), 0o600); err != nil {
+	if err := protectedfile.WriteFile(path, []byte(line)); err != nil {
 		t.Fatal(err)
 	}
 	entries, err := readJournal(path)

@@ -7,24 +7,11 @@ package protectedfile
 
 import (
 	"errors"
-	"golang.org/x/sys/windows"
 	"unsafe"
+
+	"golang.org/x/sys/windows"
 )
 
-func checkPath(path string) error {
-	name, err := windows.UTF16PtrFromString(path)
-	if err != nil {
-		return err
-	}
-	attrs, err := windows.GetFileAttributes(name)
-	if err != nil {
-		return err
-	}
-	if attrs&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-		return errors.New("protected path must not be a reparse point")
-	}
-	return nil
-}
 func currentSID() (string, error) {
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
@@ -32,39 +19,18 @@ func currentSID() (string, error) {
 	}
 	return user.User.Sid.String(), nil
 }
-
-// Protect disables inheritance and grants access only to this user and trusted
-// Windows system administrators. Directory ACEs protect newly created children.
-func Protect(path string) error {
-	if err := checkPath(path); err != nil {
-		return err
-	}
+func privateDescriptor() (*windows.SECURITY_DESCRIPTOR, error) {
 	sid, err := currentSID()
 	if err != nil {
-		return err
+		return nil, err
 	}
-	sd, err := windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;" + sid + ")(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
-	if err != nil {
-		return err
-	}
-	acl, _, err := sd.DACL()
-	if err != nil {
-		return err
-	}
-	return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil)
+	return windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;" + sid + ")(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
 }
-
-// Check rejects null DACLs and every effective access grant to another identity.
-// A permissive inherited ACE is rejected just like a permissive explicit ACE.
-func Check(path string) error {
-	if err := checkPath(path); err != nil {
-		return err
-	}
-	sid, err := currentSID()
-	if err != nil {
-		return err
-	}
-	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.OWNER_SECURITY_INFORMATION)
+func trustedPrincipal(value, current string) bool {
+	return value == current || value == "S-1-5-18" || value == "S-1-5-32-544"
+}
+func checkOwner(sd *windows.SECURITY_DESCRIPTOR) error {
+	current, err := currentSID()
 	if err != nil {
 		return err
 	}
@@ -72,9 +38,18 @@ func Check(path string) error {
 	if err != nil {
 		return err
 	}
-	trusted := func(value string) bool { return value == sid || value == "S-1-5-18" || value == "S-1-5-32-544" }
-	if owner == nil || !trusted(owner.String()) {
+	if owner == nil || !trustedPrincipal(owner.String(), current) {
 		return errors.New("protected path has an untrusted owner")
+	}
+	return nil
+}
+func checkSecurity(sd *windows.SECURITY_DESCRIPTOR) error {
+	if err := checkOwner(sd); err != nil {
+		return err
+	}
+	current, err := currentSID()
+	if err != nil {
+		return err
 	}
 	acl, _, err := sd.DACL()
 	if err != nil {
@@ -95,9 +70,65 @@ func Check(path string) error {
 			return errors.New("protected path has an unsupported access grant")
 		}
 		principal := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
-		if ace.Mask != 0 && !trusted(principal.String()) {
+		if ace.Mask != 0 && !trustedPrincipal(principal.String(), current) {
 			return errors.New("protected path grants access to another identity")
 		}
 	}
 	return nil
+}
+func securityForHandle(handle windows.Handle) (*windows.SECURITY_DESCRIPTOR, error) {
+	return windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+}
+func checkHandle(handle windows.Handle) error {
+	sd, err := securityForHandle(handle)
+	if err != nil {
+		return err
+	}
+	return checkSecurity(sd)
+}
+func protectHandle(handle windows.Handle) error {
+	existing, err := securityForHandle(handle)
+	if err != nil {
+		return err
+	}
+	// Changing the DACL cannot remove the original owner's power to restore it.
+	sd, err := protectionDescriptor(existing)
+	if err != nil {
+		return err
+	}
+	acl, _, err := sd.DACL()
+	if err != nil {
+		return err
+	}
+	if err := windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil); err != nil {
+		return err
+	}
+	return checkHandle(handle)
+}
+
+// Protect validates ownership and changes the ACL of the inspected object itself.
+func Protect(path string) error {
+	file, err := openCheckedPath(path, windows.READ_CONTROL|windows.WRITE_DAC|windows.FILE_READ_ATTRIBUTES, windows.FILE_OPEN, 0, nil)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	return protectHandle(windows.Handle(file.Fd()))
+}
+
+// Check validates the object reached by pinned, non-reparse directory handles.
+func Check(path string) error {
+	file, err := openCheckedPath(path, windows.READ_CONTROL|windows.FILE_READ_ATTRIBUTES, windows.FILE_OPEN, 0, nil)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	return checkHandle(windows.Handle(file.Fd()))
+}
+
+func protectionDescriptor(existing *windows.SECURITY_DESCRIPTOR) (*windows.SECURITY_DESCRIPTOR, error) {
+	if err := checkOwner(existing); err != nil {
+		return nil, err
+	}
+	return privateDescriptor()
 }

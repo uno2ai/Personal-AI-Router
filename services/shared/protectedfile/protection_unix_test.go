@@ -32,3 +32,28 @@ func TestUnixProtectionRejectsBroadModes(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestUnixKeepsStickyAndSymlinkTraversalParents(t *testing.T) {
+	root := t.TempDir()
+	shared := filepath.Join(root, "shared")
+	if err := os.Mkdir(shared, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(shared, 0o777|os.ModeSticky); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "alias")
+	if err := os.Symlink(shared, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteFile(filepath.Join(link, "private", "secret"), []byte("fixture")); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(shared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o777 || info.Mode()&os.ModeSticky == 0 {
+		t.Fatal("existing sticky ancestor was changed")
+	}
+}

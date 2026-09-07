@@ -6,68 +6,39 @@ package protectedfile
 
 import (
 	"errors"
-	"fmt"
 	"os"
-	"path/filepath"
+	"sync"
 )
 
-// EnsureDir creates missing ancestors privately and protects the target directory.
-// It does not change permissions on existing ancestors outside the target.
-func EnsureDir(path string) error {
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		parent := filepath.Dir(path)
-		if parent == path {
-			return err
-		}
-		if _, err := os.Lstat(parent); errors.Is(err, os.ErrNotExist) {
-			if err := EnsureDir(parent); err != nil {
-				return err
-			}
-		}
-		if err := os.Mkdir(path, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
-			return err
-		}
-		info, err = os.Lstat(path)
-	}
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("protected directory is not a directory")
-	}
-	return Protect(path)
+// File retains the directory handles needed to keep an operation bound to the
+// inspected objects. Close releases both the file and its directory handles.
+type File struct {
+	*os.File
+	closeOnce   sync.Once
+	closeErr    error
+	beforeClose func() error
+	release     func()
+	publish     func(string) error
 }
 
-// WriteFile atomically replaces a file with privately staged, synced data.
-func WriteFile(path string, data []byte) error {
-	if err := EnsureDir(filepath.Dir(path)); err != nil {
-		return err
-	}
-	if info, err := os.Lstat(path); err == nil {
-		if !info.Mode().IsRegular() {
-			return errors.New("protected destination is not a regular file")
+func (f *File) Close() error {
+	f.closeOnce.Do(func() {
+		if f.beforeClose != nil {
+			f.closeErr = f.beforeClose()
 		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
+		f.closeErr = errors.Join(f.closeErr, f.File.Close())
+		if f.release != nil {
+			f.release()
+		}
+	})
+	return f.closeErr
+}
+
+// Publish renames a staged file within its pinned containing directory.
+// The caller must sync it first and keep it open until publication completes.
+func (f *File) Publish(path string) error {
+	if f.publish == nil {
+		return errors.New("file is not staged for publication")
 	}
-	f, err := os.CreateTemp(filepath.Dir(path), ".private-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(f.Name())
-	defer f.Close()
-	if err := Protect(f.Name()); err != nil {
-		return err
-	}
-	if _, err := f.Write(data); err != nil {
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	return os.Rename(f.Name(), path)
+	return f.publish(path)
 }

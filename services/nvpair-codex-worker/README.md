@@ -43,9 +43,12 @@ full path, if resolution fails. Other script launchers are rejected.
 
 Worker state, isolated Codex authentication, and local credentials use private
 Windows ACLs (current user, SYSTEM, and Administrators) or Unix `0700` directories
-and `0600` files. Managed configuration and credential readers reject access
-from other identities on both the file and its containing directory. A launcher
-must protect that directory and configuration before writing its bearer token.
+and `0600` files. Managed configuration and credential readers inspect the actual file handle
+and reject access from other identities. Windows protected I/O pins traversal
+directories and rejects junctions before reading, writing, or publishing files;
+public traversal ancestors are not changed. Existing journals must already be
+private, because tightening an ACL cannot revoke previously opened data handles.
+A launcher must use the protected writer before writing its bearer token.
 Windows app-server children start suspended and join a kill-on-close job before
 running; descendants terminate when their Worker-owned job closes. Journal and
 workspace locks retain Windows thread ownership across asynchronous callbacks.

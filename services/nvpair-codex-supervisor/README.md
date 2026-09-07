@@ -63,8 +63,10 @@ Windows firewall.
 
 ## Local protected state on Windows
 
-The local Worker credential and its containing directory must permit access
-only to the current user, SYSTEM, and Administrators. The Supervisor validates
-Windows ACLs rather than Unix permission bits and rejects broad or missing
-DACLs. Unix group/world permission checks remain enforced. Supervisor task-index
-and management registry directories are protected before state is written.
+The local Worker credential must permit access only to the current user, SYSTEM,
+and Administrators. The Supervisor validates ACLs on the actual opened file
+handle and retains its directory handles while reading, rather than checking a
+mutable path and reopening it. Broad or missing DACLs and reparse traversal are
+rejected. New task-index files are private at creation; existing broad or
+hard-linked index files are rejected before append. Unix group/world checks
+remain enforced and existing Unix traversal parents are not changed.

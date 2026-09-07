@@ -13,7 +13,6 @@ import (
 	"net/url"
 	"nvpair-shared/protectedfile"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -122,31 +121,7 @@ func WriteDescriptor(path string, descriptor RuntimeDescriptor) error {
 		return fmt.Errorf("marshal runtime descriptor: %w", err)
 	}
 	data = append(data, '\n')
-	if err := protectedfile.EnsureDir(filepath.Dir(path)); err != nil {
-		return fmt.Errorf("create runtime directory: %w", err)
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".runtime-*.tmp")
-	if err != nil {
-		return fmt.Errorf("create runtime temporary file: %w", err)
-	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
-	if err := protectedfile.Protect(tmp.Name()); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("protect runtime descriptor: %w", err)
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("write runtime descriptor: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("sync runtime descriptor: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close runtime descriptor: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
+	if err := protectedfile.WriteFile(path, data); err != nil {
 		return fmt.Errorf("publish runtime descriptor: %w", err)
 	}
 	return nil
