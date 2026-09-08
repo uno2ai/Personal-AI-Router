@@ -81,8 +81,8 @@ This is not a declaration that both platforms are fully accepted.
 ### Initial blocked checks and observed limitations
 
 The following records describe the initial run. The follow-up below supersedes
-the Windows GUI and approval-client gaps, but not the reverse task-execution
-or everyday Codex app UI gaps.
+the Windows GUI and approval-client gaps. Windows-local reverse execution is
+recorded below; the everyday Codex app UI remains a separate gap.
 
 1. Main Codex launched from the saved isolated MCP configuration could not
    invoke `workers.list`: it reported that the MCP call required approval,
@@ -138,7 +138,39 @@ Task `task-0d8d98ddce707fce1c362875` completed and its handoff reported:
 
 This closes Mac-to-new-Windows-Desktop-managed read-only task execution.
 The Mac check used a Supervisor JSON-RPC test harness, not the everyday
-Codex app's approval UI. Actual Windows-to-Mac task execution, the everyday
-Codex app approval interaction, and the stale management-socket diagnostic
-remain distinct outstanding checks/issues. No production Main configuration
+Codex app's approval UI. The everyday Codex app approval interaction remains
+a distinct outstanding check. No production Main configuration
 or existing Worker process was changed by this follow-up.
+
+## Windows-local reverse execution and Main-exit display
+
+Windows built the candidate Supervisor natively at `ae36de3`, initialized it
+with the existing PAIR cluster and a separate temporary state directory, and
+queried the paired Mac Worker over mTLS. Read-only task
+`task-86c1fadaa1744233e06769c1` completed with a child identity and no Supervisor
+stderr output. This closes Windows-to-Mac execution through a Supervisor test
+client. It does not establish the everyday Codex app approval UI.
+
+The original initialization harness also succeeded from the Windows-local
+user context using its original executable and state directory. The remote
+sandbox's `Access is denied` was not reproduced; its exact permission cause
+remains undetermined. No ACL or sandbox restriction was weakened.
+
+Windows native Worker and Supervisor tests passed. Desktop tests at that
+candidate passed 243 tests with two skips, and all three typecheck targets
+passed. Windows race instrumentation was unavailable (CGO disabled and no
+C compiler on PATH); Mac race evidence remains separate.
+
+The renderer now checks Main's connection state before requesting task
+metadata and rechecks after a failed request to handle Main exiting during
+the request. Waiting/unregistered Main clears stale task rows and socket
+errors; failures while Main remains connected are still shown. Regression
+tests cover both exit timings and preservation of connected-state errors.
+
+Windows validation of this display fix: 246 Desktop tests passed, two skipped;
+all typecheck targets, lint, dead-code and service-contract checks passed.
+The rebuilt packaged GUI showed Worker Ready and Waiting for Main without
+stale socket errors after refreshing the isolated MCP registration for the
+new package path. The verified GUI Worker now uses PID 85324 on the same
+100.70.48.68:14325 endpoint and original candidate workspace. Existing
+Workers 39384 and 3432 remained running.

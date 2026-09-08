@@ -44,9 +44,26 @@ export const useCodexStore = create<CodexStore>(set => ({
     },
     refreshTasks: async () => {
         try {
+            const state = await window.windowApi.codex.getState()
+            set({ state })
+            if (state.registration.state === 'waiting_for_main' || state.registration.state === 'unregistered') {
+                set({ tasks: [], error: null })
+                return
+            }
             const tasks = await window.windowApi.codex.listTasks()
             set({ tasks, error: null })
         } catch (error) {
+            // Main may have exited after the initial state check.
+            try {
+                const state = await window.windowApi.codex.getState()
+                set({ state })
+                if (state.registration.state === 'waiting_for_main' || state.registration.state === 'unregistered') {
+                    set({ tasks: [], error: null })
+                    return
+                }
+            } catch {
+                // Preserve the original failure if connection state is unavailable.
+            }
             set({ error: error instanceof Error ? error.message : String(error) })
         }
     },

@@ -102,7 +102,7 @@ describe('Codex renderer store', () => {
     })
 
     it('keeps task rows metadata-only and sends the opaque lease reference on cancel', async () => {
-        const api = installApi()
+        const api = installApi({ getState: async () => connectedState })
         await useCodexStore.getState().refreshTasks()
         expect(useCodexStore.getState().tasks).toEqual([task])
         await useCodexStore.getState().cancelTask({
@@ -117,4 +117,32 @@ describe('Codex renderer store', () => {
         })
         expect(useCodexStore.getState().tasks).toEqual([task])
     })
+
+    it('clears stale task errors without contacting an exited Main', async () => {
+        const api = installApi()
+        useCodexStore.setState({ tasks: [task], error: 'connect ENOENT stale socket' })
+        await useCodexStore.getState().refreshTasks()
+        expect(api.listTasks).not.toHaveBeenCalled()
+        expect(useCodexStore.getState().tasks).toEqual([])
+        expect(useCodexStore.getState().error).toBeNull()
+    })
+
+    it('handles Main exiting between the state check and task request', async () => {
+        const getState = vi.fn().mockResolvedValueOnce(connectedState).mockResolvedValue(disabledState)
+        installApi({ getState, listTasks: async () => { throw new Error('connect ECONNREFUSED stale socket') } })
+        await useCodexStore.getState().refreshTasks()
+        expect(useCodexStore.getState().state?.registration.state).toBe('unregistered')
+        expect(useCodexStore.getState().error).toBeNull()
+    })
+
+    it('preserves task errors when Main remains connected', async () => {
+        installApi({ getState: async () => connectedState, listTasks: async () => { throw new Error('invalid task response') } })
+        await useCodexStore.getState().refreshTasks()
+        expect(useCodexStore.getState().error).toBe('invalid task response')
+    })
 })
+
+const connectedState: CodexDesktopState = {
+    ...readyState,
+    registration: { ...readyState.registration, state: 'connected' }
+}
