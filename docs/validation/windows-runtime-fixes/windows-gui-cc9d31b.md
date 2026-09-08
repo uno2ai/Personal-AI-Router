@@ -57,8 +57,9 @@ The Worker sandbox, approval handling and task limits were unchanged.
 After configuration or relaunch, the Workspace root and Codex executable
 inputs are empty even though their saved settings are still used and the Worker
 is Ready. The GUI therefore does not show the currently configured paths.
-This is a display/usability issue; persisted configuration and restart were
-verified independently. It remains a follow-up, not a fixed item in this report.
+This was a display/usability issue; persisted configuration and restart were
+verified independently. It was subsequently fixed in `abeb67e` and verified in
+the [macOS and Windows path-restoration checks](settings-path-restoration.md).
 
 ## Evidence and boundaries
 
