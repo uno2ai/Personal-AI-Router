@@ -120,16 +120,30 @@ export default function CodexSettings() {
                             value={policyCeiling}
                             onChange={event =>
                                 setPolicyCeiling(
-                                    event.target.value === 'workspace-write'
-                                        ? 'workspace-write'
-                                        : 'read-only'
+                                    event.target.value === 'danger-full-access'
+                                        ? 'danger-full-access'
+                                        : event.target.value === 'workspace-write'
+                                          ? 'workspace-write'
+                                          : 'read-only'
                                 )
                             }
                         >
                             <option value="read-only">Read-only</option>
                             <option value="workspace-write">Workspace write</option>
+                            <option value="danger-full-access">
+                                YOLO — no sandbox or approvals
+                            </option>
                         </select>
                     </label>
+                    {policyCeiling === 'danger-full-access' && (
+                        <Text kind="body/regular/sm">
+                            YOLO permits tasks requested with mode=yolo to run with your full user
+                            permissions, without a sandbox or approval prompts. The workspace is
+                            only the starting directory, not a file-access boundary. Paired access
+                            controls and task cancellation remain enabled. Apply registration and
+                            reload Main Codex to make YOLO the default for new delegated tasks.
+                        </Text>
+                    )}
                     <Text kind="body/semibold/md">Paired remote connections</Text>
                     <Text kind="body/regular/sm">
                         Pair the computers with Add node first. For different locations, use their

@@ -33,6 +33,7 @@ func main() {
 	allowedSupervisors := flag.String("supervisor-allowlist", "", "comma-separated authorized Supervisor certificate principals in mTLS mode")
 	toolLabels := flag.String("tool-labels", "", "comma-separated local capability labels advertised to the Supervisor")
 	artifactMaxBytes := flag.Int64("artifact-max-bytes", 8<<20, "maximum size of one staged artifact")
+	policyCeiling := flag.String("policy-ceiling", "workspace-write", "execution ceiling: read-only, workspace-write, or explicit danger-full-access opt-in")
 	managedControl := flag.Bool("managed-control", false, "run as a broker-managed Worker using JSONL control on stdin/stdout")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
@@ -46,6 +47,9 @@ func main() {
 			log.Printf("managed Worker control stopped: %v", err)
 		}
 		return
+	}
+	if *policyCeiling != "read-only" && *policyCeiling != "workspace-write" && *policyCeiling != "danger-full-access" {
+		log.Fatal("--policy-ceiling must be read-only, workspace-write, or danger-full-access")
 	}
 	if *workspaceRoot == "" {
 		log.Fatal("--workspace-root is required")
@@ -112,6 +116,7 @@ func main() {
 		worker = NewServerWithArtifacts(store, appServers, policy, artifacts, *maxConcurrency, *authToken).(*workerHTTPServer)
 	}
 	worker.toolLabels = commaSeparated(*toolLabels)
+	worker.policyCeiling = *policyCeiling
 	httpServer := &http.Server{Handler: worker}
 	listener, err := net.Listen("tcp", *listen)
 	if err != nil {

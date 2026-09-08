@@ -211,7 +211,16 @@ func targetEligible(target WorkerTarget, req WorkerRequirements) bool {
 	if req.Workspace != "" && len(caps.WorkspaceAliases) > 0 && !hasString(caps.WorkspaceAliases, req.Workspace) {
 		return false
 	}
-	if req.Mode != "" && len(caps.WorkspaceModes) > 0 && !hasString(caps.WorkspaceModes, req.Mode) {
+	mode := req.Mode
+	if mode == "yolo" {
+		// Missing capability fields are never treated as YOLO support, even
+		// for an explicitly selected Worker or an older protocol peer.
+		if !hasString(caps.WorkspaceModes, "write") || !hasString(caps.SandboxModes, "danger-full-access") || !hasString(caps.ApprovalModes, "never") {
+			return false
+		}
+		mode = "write"
+	}
+	if mode != "" && len(caps.WorkspaceModes) > 0 && !hasString(caps.WorkspaceModes, mode) {
 		return false
 	}
 	for _, required := range req.Tools {

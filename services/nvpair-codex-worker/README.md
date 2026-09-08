@@ -94,6 +94,22 @@ tool labels, workspace policy, and policy ceiling. Managed shutdown and config
 replacement stop both listeners and wait for the revocation and descriptor
 watchers. Remote endpoint registration belongs to the managing application.
 
+YOLO execution requires explicit local opt-in: managed configuration uses
+`"policyCeiling": "danger-full-access"`; standalone Workers use
+`--policy-ceiling danger-full-access`. The standalone default remains
+`workspace-write`. Only opted-in Workers advertise the `danger-full-access`
+sandbox and `never` approval capabilities. YOLO requests must use a `write`
+workspace with both of those execution settings; mixed pairs are rejected.
+Read/write requests retain their existing restrictive execution settings even
+on a YOLO-capable Worker.
+
+YOLO starts and resumes native threads with `approvalPolicy: "never"` and
+`sandbox: "danger-full-access"`, and turns with the `dangerFullAccess` policy.
+The initial working directory is still validated against the configured root,
+but it is not a filesystem sandbox for YOLO execution. Pairing, pinned mTLS,
+Supervisor allowlists, artifact validation, lease fencing, and cancellation
+remain enforced. Resuming a saved YOLO task is denied after local opt-out.
+
 ## Protocol
 
 The Phase 1 routes are:

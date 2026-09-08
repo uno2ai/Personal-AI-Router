@@ -391,6 +391,13 @@ func (s *AppServerSession) RunFollowUpWithChild(ctx context.Context, request cod
 }
 
 func (s *AppServerSession) runWithThread(ctx context.Context, request codexprotocol.TaskRequest, emit func(codexprotocol.TaskEvent), onChild func(string) error, onThread func(string) error, resumeThreadID string) (codexprotocol.Handoff, error) {
+	if err := request.Execution.Validate(); err != nil {
+		return codexprotocol.Handoff{}, err
+	}
+	approvalPolicy := "on-request"
+	if request.Execution.Approval == "never" {
+		approvalPolicy = "never"
+	}
 	cwd, err := appServerCWD(request.Workspace.Path)
 	if err != nil {
 		return codexprotocol.Handoff{}, err
@@ -496,16 +503,16 @@ func (s *AppServerSession) runWithThread(ctx context.Context, request codexproto
 	if resumeThreadID == "" {
 		threadResult, err = s.callResult(callCtx, peer, "thread/start", map[string]any{
 			"cwd":            cwd,
-			"sandbox":        sandboxFor(request.Execution.Sandbox),
-			"approvalPolicy": "on-request",
+			"sandbox":        request.Execution.Sandbox,
+			"approvalPolicy": approvalPolicy,
 			"ephemeral":      false,
 		})
 	} else {
 		threadResult, err = s.callResult(callCtx, peer, "thread/resume", map[string]any{
 			"threadId":       resumeThreadID,
 			"cwd":            cwd,
-			"sandbox":        sandboxFor(request.Execution.Sandbox),
-			"approvalPolicy": "on-request",
+			"sandbox":        request.Execution.Sandbox,
+			"approvalPolicy": approvalPolicy,
 			"excludeTurns":   true,
 		})
 	}
@@ -536,7 +543,7 @@ func (s *AppServerSession) runWithThread(ctx context.Context, request codexproto
 			"text": turnPrompt(request),
 		}},
 		"cwd":            cwd,
-		"approvalPolicy": "on-request",
+		"approvalPolicy": approvalPolicy,
 		"sandboxPolicy":  sandboxPolicyFor(request.Execution.Sandbox, cwd),
 		"outputSchema":   handoffSchema(),
 	})
@@ -938,14 +945,10 @@ func appServerCWD(path string) (string, error) {
 	return path, nil
 }
 
-func sandboxFor(sandbox string) string {
-	if sandbox == "workspace-write" {
-		return "workspace-write"
-	}
-	return "read-only"
-}
-
 func sandboxPolicyFor(sandbox, cwd string) map[string]any {
+	if sandbox == "danger-full-access" {
+		return map[string]any{"type": "dangerFullAccess"}
+	}
 	if sandbox == "workspace-write" {
 		return map[string]any{"type": "workspaceWrite", "writableRoots": []string{cwd}}
 	}

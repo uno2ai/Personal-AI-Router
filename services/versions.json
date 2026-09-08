@@ -16,7 +16,7 @@
     "nvpair-cluster-manager": "1.1.4",
     "nvpair-job-scheduler": "0.4.1",
     "nvpair-tui": "0.7.2",
-    "nvpair-codex-worker": "0.2.0",
-    "nvpair-codex-supervisor": "0.2.0"
+    "nvpair-codex-worker": "0.3.0",
+    "nvpair-codex-supervisor": "0.3.0"
   }
 }

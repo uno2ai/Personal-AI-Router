@@ -41,6 +41,33 @@ func validHandoff() Handoff {
 	}
 }
 
+func TestExecutionPolicyPairs(t *testing.T) {
+	for _, sandbox := range []string{"read-only", "workspace-write", "danger-full-access", "unknown", ""} {
+		for _, approval := range []string{"local-only", "never", "on-request", ""} {
+			want := (sandbox == "read-only" || sandbox == "workspace-write") && approval == "local-only" || sandbox == "danger-full-access" && approval == "never"
+			if err := (ExecutionSpec{Sandbox: sandbox, Approval: approval}).Validate(); (err == nil) != want {
+				t.Errorf("%s/%s: %v, valid=%v", sandbox, approval, err, want)
+			}
+		}
+	}
+}
+
+func TestYOLORequiresWriteWorkspace(t *testing.T) {
+	r := validTaskRequest("r", "t", "a", 1)
+	r.Execution = ExecutionSpec{Sandbox: "danger-full-access", Approval: "never"}
+	if r.Validate() == nil {
+		t.Fatal("YOLO accepted a read workspace")
+	}
+	r.Workspace.Mode = "write"
+	data, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeTaskRequest(data); err != nil {
+		t.Fatalf("YOLO rejected: %v", err)
+	}
+}
+
 func TestDecodeTaskRequestRejectsOversizedContext(t *testing.T) {
 	request := validTaskRequest("request-1", "task-1", "attempt-1", 1)
 	request.Context.Objective = strings.Repeat("x", MaxContextBytes)

@@ -56,6 +56,19 @@ workspace mode, tool labels, protocol version, and available slots), then
 prefers locality/capacity and breaks ties by Worker ID. It never calls
 `nvpair-job-scheduler` for this decision.
 
+`tasks.delegate` accepts `mode: "yolo"`, mapping it to a `write` workspace,
+`danger-full-access` sandbox, and `never` approval. It selects only Workers
+that explicitly advertise all three capabilities, even when `workerId` is
+specified. Older Workers and partially matching capabilities cannot receive a
+YOLO task; no fallback to read/write execution occurs.
+
+`--default-task-mode read|write|yolo` controls delegation when `mode` is omitted.
+The default is `read`. Explicit `read` or `write` requests keep their existing
+execution settings even when the configured default is `yolo`. Approval can be
+omitted to use the mode's paired value: `local-only` for read/write and `never`
+for YOLO. Conflicting approval values are rejected. The managing application
+owns Main's shell and MCP approval configuration separately.
+
 There is no approval tool or approval relay. Worker approval events end in
 `blocked/approval_required`; only a human at the Worker host can continue.
 The Supervisor itself remains local stdio-only and is not exposed by the

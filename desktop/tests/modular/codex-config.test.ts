@@ -282,6 +282,51 @@ describe('Codex config defaults', () => {
             fs.rmSync(root, { recursive: true, force: true })
         }
     })
+    it('persists explicit YOLO policy into the managed Worker and restores it without changing defaults', () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pair-yolo-config-'))
+        try {
+            expect(defaultCodexConfig().policyCeiling).toBe('read-only')
+            const manager = new CodexManager(root, '/pair/supervisor', path.join(root, 'main'))
+            manager.configureWorker({ workspaceRoot: root, policyCeiling: 'danger-full-access' })
+            const managed = JSON.parse(
+                fs.readFileSync(path.join(root, 'codex', 'worker-config.json'), 'utf8')
+            )
+            expect(managed.policyCeiling).toBe('danger-full-access')
+            const reopened = new CodexManager(root, '/pair/supervisor', path.join(root, 'main'))
+            expect(reopened.getState().worker.policyCeiling).toBe('danger-full-access')
+            expect(reopened.applyMcpRegistration().args).toEqual(
+                expect.arrayContaining(['--default-task-mode', 'yolo'])
+            )
+            expect(getMcpRegistration(path.join(root, 'main', 'config.toml'))).toMatchObject({
+                defaultToolsApprovalMode: 'approve'
+            })
+            const mainConfig = path.join(root, 'main', 'config.toml')
+            writeProtectedConfig(
+                mainConfig,
+                fs
+                    .readFileSync(mainConfig, 'utf8')
+                    .replace(
+                        'default_tools_approval_mode = "approve"',
+                        'default_tools_approval_mode = "prompt"'
+                    )
+            )
+            expect(reopened.getMcpRegistration().state).toBe('failed')
+            expect(reopened.applyMcpRegistration().state).toBe('waiting_for_main')
+            reopened.configureWorker({ workspaceRoot: root, policyCeiling: 'read-only' })
+            expect(reopened.getMcpRegistration().state).toBe('failed')
+            expect(reopened.applyMcpRegistration().args).not.toContain('--default-task-mode')
+            expect(getMcpRegistration(path.join(root, 'main', 'config.toml'))).not.toHaveProperty(
+                'defaultToolsApprovalMode',
+                'approve'
+            )
+            expect(
+                JSON.parse(fs.readFileSync(path.join(root, 'codex', 'worker-config.json'), 'utf8'))
+                    .policyCeiling
+            ).toBe('read-only')
+        } finally {
+            fs.rmSync(root, { recursive: true, force: true })
+        }
+    })
     it('restores remote settings and wires both managed Worker and MCP registration', () => {
         const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pair-remote-config-'))
         try {

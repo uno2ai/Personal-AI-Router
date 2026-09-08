@@ -116,7 +116,7 @@ func (c managedWorkerConfig) Validate() error {
 	if c.ArtifactMaxBytes <= 0 {
 		return errors.New("artifactMaxBytes must be positive")
 	}
-	if c.PolicyCeiling != "read-only" && c.PolicyCeiling != "workspace-write" {
+	if c.PolicyCeiling != "read-only" && c.PolicyCeiling != "workspace-write" && c.PolicyCeiling != "danger-full-access" {
 		return fmt.Errorf("unsupported policyCeiling %q", c.PolicyCeiling)
 	}
 	if strings.TrimSpace(c.WorkspaceAlias) == "" {

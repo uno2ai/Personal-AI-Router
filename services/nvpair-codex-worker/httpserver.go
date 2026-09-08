@@ -210,6 +210,11 @@ func (s *workerHTTPServer) handleWorker(w http.ResponseWriter) {
 	s.mu.Unlock()
 	workspaceModes := []string{"read", "write"}
 	sandboxModes := []string{"read-only", "workspace-write"}
+	approvalModes := []string{"local-only"}
+	if s.policyCeiling == "danger-full-access" {
+		sandboxModes = append(sandboxModes, "danger-full-access")
+		approvalModes = append(approvalModes, "never")
+	}
 	if s.policyCeiling == "read-only" {
 		workspaceModes = []string{"read"}
 		sandboxModes = []string{"read-only"}
@@ -224,7 +229,7 @@ func (s *workerHTTPServer) handleWorker(w http.ResponseWriter) {
 		WorkspaceModes:   workspaceModes,
 		ToolLabels:       append([]string(nil), s.toolLabels...),
 		SandboxModes:     sandboxModes,
-		ApprovalModes:    []string{"local-only"},
+		ApprovalModes:    approvalModes,
 		MaxConcurrency:   s.maxConcurrency,
 		AvailableSlots:   available,
 	}
@@ -274,6 +279,10 @@ func (s *workerHTTPServer) handleCreate(w http.ResponseWriter, r *http.Request) 
 	}
 	if s.policyCeiling == "read-only" && request.Workspace.Mode == "write" {
 		writeError(w, http.StatusForbidden, "managed Worker policy ceiling is read-only")
+		return
+	}
+	if request.Execution.Sandbox == "danger-full-access" && s.policyCeiling != "danger-full-access" {
+		writeError(w, http.StatusForbidden, "Worker policy ceiling does not permit danger-full-access")
 		return
 	}
 	request.SupervisorPrincipal = supervisorPrincipal(r)
@@ -417,6 +426,11 @@ func (s *workerHTTPServer) handleTurn(w http.ResponseWriter, r *http.Request, ta
 	record, ok := s.store.Get(taskID)
 	if !ok {
 		writeStoreError(w, ErrTaskNotFound)
+		return
+	}
+	if (record.Execution.Sandbox == "danger-full-access" && s.policyCeiling != "danger-full-access") ||
+		(s.policyCeiling == "read-only" && record.Workspace.Mode == "write") {
+		writeError(w, http.StatusForbidden, "Worker policy ceiling does not permit this follow-up")
 		return
 	}
 	cwd, err := s.policy.Resolve(record.Workspace)

@@ -52,6 +52,14 @@ func runFakeAppServer() int {
 		if method != "" {
 			_, _ = fmt.Fprintln(logFile, method)
 		}
+		if capturePath := os.Getenv("CODEX_FAKE_CAPTURE"); capturePath != "" {
+			capture, err := os.OpenFile(capturePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+			if err != nil {
+				return 2
+			}
+			_, _ = fmt.Fprintln(capture, line)
+			_ = capture.Close()
+		}
 		if method == "initialize" {
 			result := map[string]any{}
 			if os.Getenv("CODEX_FAKE_UNSUPPORTED") != "1" {

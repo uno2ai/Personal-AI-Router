@@ -29,6 +29,7 @@ type MCPServer struct {
 	mu               sync.Mutex
 	owners           map[string]WorkerClient
 	localRuntimePath string
+	defaultTaskMode  string
 	index            *TaskIndex
 }
 
@@ -188,7 +189,7 @@ func supervisorTools() []mcpTool {
 	return []mcpTool{
 		{Name: "artifacts.get", Description: "Read a declared Worker artifact by task and opaque artifact ID.", InputSchema: objectSchemaWith(objectSchema, map[string]any{"taskId": map[string]any{"type": "string"}, "artifactId": map[string]any{"type": "string"}}, []string{"taskId", "artifactId"})},
 		{Name: "tasks.cancel", Description: "Cancel one task using its current lease tuple.", InputSchema: objectSchemaWith(objectSchema, map[string]any{"taskId": map[string]any{"type": "string"}, "attemptId": map[string]any{"type": "string"}, "leaseEpoch": map[string]any{"type": "integer", "minimum": 1}}, []string{"taskId", "attemptId", "leaseEpoch"})},
-		{Name: "tasks.delegate", Description: "Delegate one bounded task to an eligible native Codex Worker.", InputSchema: objectSchemaWith(objectSchema, map[string]any{"objective": map[string]any{"type": "string"}, "workspace": map[string]any{"type": "string", "enum": []string{"local"}}, "mode": map[string]any{"type": "string", "enum": []string{"read", "write"}}, "approval": map[string]any{"type": "string", "enum": []string{"local-only"}}, "workerId": map[string]any{"type": "string"}, "os": map[string]any{"type": "string"}, "architecture": map[string]any{"type": "string"}, "tools": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}}, []string{"objective"})},
+		{Name: "tasks.delegate", Description: "Delegate one bounded task to an eligible native Codex Worker. YOLO requires an opted-in Worker and runs without sandbox or approval prompts. Omitted mode uses the Supervisor's configured default.", InputSchema: objectSchemaWith(objectSchema, map[string]any{"objective": map[string]any{"type": "string"}, "workspace": map[string]any{"type": "string", "enum": []string{"local"}}, "mode": map[string]any{"type": "string", "enum": []string{"read", "write", "yolo"}}, "approval": map[string]any{"type": "string", "enum": []string{"local-only", "never"}}, "workerId": map[string]any{"type": "string"}, "os": map[string]any{"type": "string"}, "architecture": map[string]any{"type": "string"}, "tools": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}}, []string{"objective"})},
 		{Name: "tasks.result", Description: "Read the compact handoff for one task.", InputSchema: objectSchemaWith(objectSchema, map[string]any{"taskId": map[string]any{"type": "string"}}, []string{"taskId"})},
 		{Name: "tasks.status", Description: "Read compact state for one task.", InputSchema: objectSchemaWith(objectSchema, map[string]any{"taskId": map[string]any{"type": "string"}}, []string{"taskId"})},
 		{Name: "workers.list", Description: "Read authenticated Worker capability metadata.", InputSchema: objectSchema},
@@ -299,13 +300,22 @@ func (s *MCPServer) delegate(ctx context.Context, raw json.RawMessage) (any, int
 		args.Workspace = "local"
 	}
 	if args.Mode == "" {
-		args.Mode = "read"
+		args.Mode = s.defaultTaskMode
+		if args.Mode == "" {
+			args.Mode = "read"
+		}
+	}
+	expectedApproval := "local-only"
+	workspaceMode := args.Mode
+	if args.Mode == "yolo" {
+		expectedApproval = "never"
+		workspaceMode = "write"
 	}
 	if args.Approval == "" {
-		args.Approval = "local-only"
+		args.Approval = expectedApproval
 	}
-	if args.Workspace != "local" || (args.Mode != "read" && args.Mode != "write") || args.Approval != "local-only" {
-		return nil, -32602, "tasks.delegate accepts only local workspace, read/write mode, and local-only approval"
+	if args.Workspace != "local" || (args.Mode != "read" && args.Mode != "write" && args.Mode != "yolo") || args.Approval != expectedApproval {
+		return nil, -32602, "tasks.delegate requires local workspace and read/write with local-only approval or yolo with never approval"
 	}
 	taskID, err := newID("task")
 	if err != nil {
@@ -322,8 +332,8 @@ func (s *MCPServer) delegate(ctx context.Context, raw json.RawMessage) (any, int
 	request := codexprotocol.TaskRequest{
 		Mutation:  codexprotocol.Mutation{ProtocolVersion: codexprotocol.ProtocolVersion, RequestID: requestID, TaskID: taskID, AttemptID: attemptID, LeaseEpoch: 1},
 		Context:   codexprotocol.ContextPackage{Version: codexprotocol.ContextVersion, Objective: args.Objective, Limits: codexprotocol.Limits{WallSeconds: 1800}},
-		Workspace: codexprotocol.WorkspaceSpec{ID: "local", Path: "local", Mode: args.Mode},
-		Execution: codexprotocol.ExecutionSpec{Sandbox: sandboxForMode(args.Mode), Approval: "local-only"},
+		Workspace: codexprotocol.WorkspaceSpec{ID: "local", Path: "local", Mode: workspaceMode},
+		Execution: codexprotocol.ExecutionSpec{Sandbox: sandboxForMode(args.Mode), Approval: args.Approval},
 	}
 	if err := s.pool.Refresh(ctx); err != nil && len(s.pool.Snapshot()) == 0 {
 		return toolError("no reachable Worker"), 0, ""
@@ -580,6 +590,9 @@ func toolError(message string) toolResult {
 }
 
 func sandboxForMode(mode string) string {
+	if mode == "yolo" {
+		return "danger-full-access"
+	}
 	if mode == "write" {
 		return "workspace-write"
 	}

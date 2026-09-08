@@ -245,6 +245,9 @@ type ExecutionSpec struct {
 }
 
 func (e ExecutionSpec) Validate() error {
+	if e.Sandbox == "danger-full-access" && e.Approval == "never" {
+		return nil
+	}
 	if e.Sandbox != "read-only" && e.Sandbox != "workspace-write" {
 		return fmt.Errorf("unsupported execution.sandbox %q", e.Sandbox)
 	}
@@ -279,8 +282,8 @@ func (r TaskRequest) Validate() error {
 	if r.Workspace.Mode == "read" && r.Execution.Sandbox != "read-only" {
 		return errors.New("read workspace requires read-only sandbox")
 	}
-	if r.Workspace.Mode == "write" && r.Execution.Sandbox != "workspace-write" {
-		return errors.New("write workspace requires workspace-write sandbox")
+	if r.Workspace.Mode == "write" && r.Execution.Sandbox != "workspace-write" && r.Execution.Sandbox != "danger-full-access" {
+		return errors.New("write workspace requires workspace-write or danger-full-access sandbox")
 	}
 	return nil
 }

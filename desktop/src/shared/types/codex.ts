@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-export type CodexPolicyCeiling = 'read-only' | 'workspace-write'
+export type CodexPolicyCeiling = 'read-only' | 'workspace-write' | 'danger-full-access'
 
 export interface CodexNetworkConfig {
     clusterDir: string
@@ -82,6 +82,7 @@ export interface CodexWorkerConfigInput {
 export interface CodexMcpRegistration {
     command: string
     args: string[]
+    defaultToolsApprovalMode?: 'approve'
 }
 
 export interface CodexTaskMetadata {

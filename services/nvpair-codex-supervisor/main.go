@@ -30,17 +30,22 @@ func main() {
 	stateRoot := flag.String("state-root", "", "durable Supervisor state directory")
 	managementSocketDir := flag.String("management-socket-dir", "", "private same-user Supervisor management registry directory")
 	configurationID := flag.String("configuration-id", "", "Desktop registration revision echoed in the management registry")
+	defaultTaskMode := flag.String("default-task-mode", "read", "default delegation mode when omitted: read, write, or yolo")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println(Version)
 		return
 	}
+	if *defaultTaskMode != "read" && *defaultTaskMode != "write" && *defaultTaskMode != "yolo" {
+		log.Fatal("--default-task-mode must be read, write, or yolo")
+	}
 	targets, err := parseWorkerTargets(*workerURL, *workerEndpoints, *workerToken, *clusterDir, *discoveryFile, *runtimeDescriptor)
 	if err != nil {
 		log.Fatal(err)
 	}
 	server := NewMCPServerWithWorkers(targets)
+	server.defaultTaskMode = *defaultTaskMode
 	server.SetLocalRuntimeDescriptor(*runtimeDescriptor)
 	resolvedStateRoot := *stateRoot
 	if resolvedStateRoot == "" {

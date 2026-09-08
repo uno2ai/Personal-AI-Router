@@ -33,10 +33,18 @@ export function getMcpRegistration(filePath: string): McpRegistrationSnapshot | 
     const lines = text.split(/\r?\n/).slice(location.start, location.end)
     const commandLine = lines.find(line => /^command\s*=/.test(line.trim()))
     const argsLine = lines.find(line => /^args\s*=/.test(line.trim()))
+    const approvalLine = lines.find(line => /^default_tools_approval_mode\s*=/.test(line.trim()))
     if (!commandLine || !argsLine) throw new Error('Managed MCP entry is incomplete')
     const command = parseTomlString(commandLine)
     const args = parseTomlStringArray(argsLine)
-    return { command, args, fingerprint: fingerprintText(text) }
+    if (approvalLine && parseTomlString(approvalLine) !== 'approve')
+        throw new Error('Managed MCP approval settings changed; Apply registration again')
+    return {
+        command,
+        args,
+        ...(approvalLine ? { defaultToolsApprovalMode: 'approve' as const } : {}),
+        fingerprint: fingerprintText(text)
+    }
 }
 
 export function applyMcpRegistration(
@@ -91,7 +99,16 @@ function renderBlock(registration: CodexMcpRegistration): string {
         throw new Error('Supervisor command must be absolute')
     if (registration.args.some(arg => typeof arg !== 'string'))
         throw new Error('Supervisor args must be strings')
-    return `${OWNERSHIP_MARKER}\n[mcp_servers.${CODEX_REGISTRATION_NAME}]\ncommand = ${JSON.stringify(registration.command)}\nargs = ${JSON.stringify(registration.args)}\n`
+    if (
+        registration.defaultToolsApprovalMode !== undefined &&
+        registration.defaultToolsApprovalMode !== 'approve'
+    )
+        throw new Error('Unsupported managed MCP approval mode')
+    const approval =
+        registration.defaultToolsApprovalMode === 'approve'
+            ? 'default_tools_approval_mode = "approve"\n'
+            : ''
+    return `${OWNERSHIP_MARKER}\n[mcp_servers.${CODEX_REGISTRATION_NAME}]\ncommand = ${JSON.stringify(registration.command)}\nargs = ${JSON.stringify(registration.args)}\n${approval}`
 }
 
 function locateBlock(text: string): BlockLocation | null {

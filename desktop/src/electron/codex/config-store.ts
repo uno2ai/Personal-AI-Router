@@ -103,7 +103,11 @@ export function validateCodexConfig(value: JsonValue): CodexConfig {
     if (typeof record.codexExecutable !== 'string' || typeof record.account !== 'string') {
         throw new Error('Codex config executable and account must be strings')
     }
-    if (record.policyCeiling !== 'read-only' && record.policyCeiling !== 'workspace-write') {
+    if (
+        record.policyCeiling !== 'read-only' &&
+        record.policyCeiling !== 'workspace-write' &&
+        record.policyCeiling !== 'danger-full-access'
+    ) {
         throw new Error('Unsupported Codex policy ceiling')
     }
     if (typeof record.installationId !== 'string' || !record.installationId) {

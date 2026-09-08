@@ -162,6 +162,7 @@ export class CodexManager {
             const outdated =
                 current &&
                 (current.command !== expected.command ||
+                    current.defaultToolsApprovalMode !== expected.defaultToolsApprovalMode ||
                     JSON.stringify(current.args) !== JSON.stringify(expected.args))
             return {
                 state: outdated
@@ -206,9 +207,13 @@ export class CodexManager {
     }
 
     private desiredRegistration(): CodexMcpRegistration {
-        const network = this.loadConfig().network
-        const registration = {
+        const config = this.loadConfig()
+        const network = config.network
+        const registration: CodexMcpRegistration = {
             command: this.supervisorCommand,
+            ...(config.policyCeiling === 'danger-full-access'
+                ? { defaultToolsApprovalMode: 'approve' as const }
+                : {}),
             args: [
                 '--runtime-descriptor',
                 codexRuntimeDescriptorPath(this.userDataRoot),
@@ -216,6 +221,9 @@ export class CodexManager {
                 path.join(this.userDataRoot, 'codex', 'supervisor-state'),
                 '--management-socket-dir',
                 path.join(this.userDataRoot, 'codex', 'management'),
+                ...(config.policyCeiling === 'danger-full-access'
+                    ? ['--default-task-mode', 'yolo']
+                    : []),
                 ...(network.workerEndpoints.length
                     ? [
                           '--cluster-dir',
