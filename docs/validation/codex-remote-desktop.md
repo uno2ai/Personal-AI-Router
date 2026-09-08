@@ -78,7 +78,11 @@ This is not a declaration that both platforms are fully accepted.
 - Mac arm64 package build passed. Signing/notarization are outside the
   personal-use acceptance scope.
 
-### Remaining gates and observed limitations
+### Initial blocked checks and observed limitations
+
+The following records describe the initial run. The follow-up below supersedes
+the Windows GUI and approval-client gaps, but not the reverse task-execution
+or everyday Codex app UI gaps.
 
 1. Main Codex launched from the saved isolated MCP configuration could not
    invoke `workers.list`: it reported that the MCP call required approval,
@@ -107,3 +111,34 @@ This is not a declaration that both platforms are fully accepted.
 The test Mac profile remains isolated from the user's normal Main Codex
 configuration. Remote reception can be stopped with Disable worker, or by
 clearing both incoming address and allowlist and saving the settings.
+
+## Windows follow-up and Mac-to-GUI execution
+
+The Windows operator reported verification of candidate `ae36de3`:
+
+- Windows package build and actual GUI launch passed.
+- Remote settings survived a clean exit/relaunch and the Worker became Ready.
+- Main Codex requested real MCP approval; one-time approval allowed
+  `workers.list` to return both local and Mac Workers in the validation client.
+- Packaged native E2E: two passed, one macOS-only test skipped.
+- Unauthenticated remote access was rejected.
+
+The operator identified the new GUI Worker as PID 75092 on port 14325 and
+left the older Workers running. This report is Windows-side evidence, not
+a claim that the Mac agent independently inspected the Windows GUI.
+
+The Mac agent then directly verified the new port 14325 endpoint with pinned
+mTLS. `workers.list` returned Windows amd64 Worker 0.2.0 with read-only policy.
+Task `task-0d8d98ddce707fce1c362875` completed and its handoff reported:
+
+- `Get-Location; git status --short` exited zero.
+- Working directory was the new `pair-candidate-gui-5v1cUC/workspace` temporary
+  Windows GUI workspace, not the old standalone Worker's workspace.
+- Git status was clean and the result included `PAIR_MAC_WINDOWS_GUI_OK`.
+
+This closes Mac-to-new-Windows-Desktop-managed read-only task execution.
+The Mac check used a Supervisor JSON-RPC test harness, not the everyday
+Codex app's approval UI. Actual Windows-to-Mac task execution, the everyday
+Codex app approval interaction, and the stale management-socket diagnostic
+remain distinct outstanding checks/issues. No production Main configuration
+or existing Worker process was changed by this follow-up.
