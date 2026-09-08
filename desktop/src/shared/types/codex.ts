@@ -36,6 +36,8 @@ export interface CodexConfig {
 }
 
 export interface CodexWorkerStateSnapshot {
+    workspaceRoot: string
+    codexExecutable: string
     state: CodexWorkerState
     enabled: boolean
     policyCeiling: CodexPolicyCeiling

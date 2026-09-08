@@ -29,11 +29,19 @@ const REGISTRATION_LABELS: Record<string, string> = {
 }
 
 export default function CodexSettings() {
-    const { state, loading, error, refresh, configureWorker, setWorkerEnabled, applyRegistration, removeRegistration } =
-        useCodexStore()
-    const [workspaceRoot, setWorkspaceRoot] = useState('')
-    const [codexExecutable, setCodexExecutable] = useState('')
-    const [policyCeiling, setPolicyCeiling] = useState<CodexPolicyCeiling>('read-only')
+    const {
+        state,
+        loading,
+        error,
+        refresh,
+        configureWorker,
+        setWorkerEnabled,
+        applyRegistration,
+        removeRegistration
+    } = useCodexStore()
+    const [workspaceDraft, setWorkspaceRoot] = useState<string | null>(null)
+    const [executableDraft, setCodexExecutable] = useState<string | null>(null)
+    const [policyDraft, setPolicyCeiling] = useState<CodexPolicyCeiling | null>(null)
 
     useEffect(() => {
         void refresh()
@@ -42,9 +50,10 @@ export default function CodexSettings() {
     const worker = state?.worker
     const registration = state?.registration
 
-    useEffect(() => {
-        if (worker) setPolicyCeiling(worker.policyCeiling)
-    }, [worker])
+    // Saved values populate untouched fields; refreshes preserve edits in progress.
+    const workspaceRoot = workspaceDraft ?? worker?.workspaceRoot ?? ''
+    const codexExecutable = executableDraft ?? worker?.codexExecutable ?? ''
+    const policyCeiling = policyDraft ?? worker?.policyCeiling ?? 'read-only'
 
     return (
         <Stack gap="6" className="relative py-8 px-3 w-full">
@@ -62,7 +71,14 @@ export default function CodexSettings() {
                 <Stack gap="4">
                     <Flex align="center" justify="between" gap="3">
                         <Text kind="body/semibold/md">Local Worker</Text>
-                        <Badge color={worker?.state === 'ready' || worker?.state === 'busy' ? 'green' : 'gray'} kind="solid">
+                        <Badge
+                            color={
+                                worker?.state === 'ready' || worker?.state === 'busy'
+                                    ? 'green'
+                                    : 'gray'
+                            }
+                            kind="solid"
+                        >
                             {STATUS_LABELS[worker?.state ?? 'disabled'] ?? 'Unknown'}
                         </Badge>
                     </Flex>
@@ -89,7 +105,9 @@ export default function CodexSettings() {
                         <select
                             className="bg-transparent border border-white/20 rounded px-2 py-1"
                             value={policyCeiling}
-                            onChange={event => setPolicyCeiling(event.target.value as CodexPolicyCeiling)}
+                            onChange={event =>
+                                setPolicyCeiling(event.target.value as CodexPolicyCeiling)
+                            }
                         >
                             <option value="read-only">Read-only</option>
                             <option value="workspace-write">Workspace write</option>
@@ -118,7 +136,12 @@ export default function CodexSettings() {
                         >
                             {worker?.enabled ? 'Disable worker' : 'Enable worker'}
                         </Button>
-                        <Button kind="secondary" size="small" disabled={loading} onClick={() => void refresh()}>
+                        <Button
+                            kind="secondary"
+                            size="small"
+                            disabled={loading}
+                            onClick={() => void refresh()}
+                        >
                             Refresh
                         </Button>
                     </Flex>
@@ -130,23 +153,39 @@ export default function CodexSettings() {
                 <Stack gap="4">
                     <Flex align="center" justify="between" gap="3">
                         <Text kind="body/semibold/md">Main Codex MCP</Text>
-                        <Badge color={registration?.state === 'connected' ? 'green' : 'gray'} kind="solid">
-                            {REGISTRATION_LABELS[registration?.state ?? 'unregistered'] ?? 'Unknown'}
+                        <Badge
+                            color={registration?.state === 'connected' ? 'green' : 'gray'}
+                            kind="solid"
+                        >
+                            {REGISTRATION_LABELS[registration?.state ?? 'unregistered'] ??
+                                'Unknown'}
                         </Badge>
                     </Flex>
                     <Text kind="body/regular/sm" className="text-subtle-color">
-                        A successful file write means registered; Main Codex must reload its configuration
-                        before tools are connected.
+                        A successful file write means registered; Main Codex must reload its
+                        configuration before tools are connected.
                     </Text>
                     <Flex gap="2" wrap="wrap">
-                        <Button kind="secondary" size="small" disabled={loading} onClick={() => void applyRegistration()}>
+                        <Button
+                            kind="secondary"
+                            size="small"
+                            disabled={loading}
+                            onClick={() => void applyRegistration()}
+                        >
                             Apply registration
                         </Button>
-                        <Button kind="secondary" size="small" disabled={loading} onClick={() => void removeRegistration()}>
+                        <Button
+                            kind="secondary"
+                            size="small"
+                            disabled={loading}
+                            onClick={() => void removeRegistration()}
+                        >
                             Remove PAIR entry
                         </Button>
                     </Flex>
-                    {registration?.path && <Text kind="body/regular/xs">Config: {registration.path}</Text>}
+                    {registration?.path && (
+                        <Text kind="body/regular/xs">Config: {registration.path}</Text>
+                    )}
                 </Stack>
             </div>
 

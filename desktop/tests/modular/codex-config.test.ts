@@ -221,6 +221,12 @@ describe('Codex config defaults', () => {
         const manager = new CodexManager(root, '/pair/supervisor', path.join(root, 'main-codex'))
         expect(manager.getState().worker.state).toBe('disabled')
         const configured = manager.configureWorker({ workspaceRoot: path.join(root, 'workspace') })
+        const reopened = new CodexManager(root, '/pair/supervisor', path.join(root, 'main-codex'))
+        expect(reopened.getState().worker).toMatchObject({
+            workspaceRoot: path.join(root, 'workspace'),
+            codexExecutable: configured.worker.codexExecutable
+        })
+        expect(configured.worker.codexExecutable).not.toBe('')
         expect(configured.worker.state).toBe('disabled')
         expect(configured.worker.policyCeiling).toBe('read-only')
         manager.setWorkerEnabled(true)

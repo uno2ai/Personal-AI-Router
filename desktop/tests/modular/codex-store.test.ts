@@ -8,6 +8,8 @@ import type { CodexDesktopState, CodexTaskMetadata } from '@/shared/types/codex'
 
 const disabledState: CodexDesktopState = {
     worker: {
+        workspaceRoot: '',
+        codexExecutable: '',
         state: 'disabled',
         enabled: false,
         policyCeiling: 'read-only',
@@ -55,7 +57,10 @@ function installApi(overrides: Partial<typeof window.windowApi.codex> = {}) {
         configureWorker: vi.fn(async () => readyState),
         setWorkerEnabled: vi.fn(async () => readyState),
         getMcpRegistration: vi.fn(async () => disabledState.registration),
-        applyMcpRegistration: vi.fn(async () => ({ ...disabledState.registration, state: 'waiting_for_main' as const })),
+        applyMcpRegistration: vi.fn(async () => ({
+            ...disabledState.registration,
+            state: 'waiting_for_main' as const
+        })),
         removeMcpRegistration: vi.fn(async () => disabledState.registration),
         listTasks: vi.fn(async () => [task]),
         cancelTask: vi.fn(async () => undefined),
@@ -99,8 +104,18 @@ describe('Codex renderer store', () => {
         const api = installApi()
         await useCodexStore.getState().refreshTasks()
         expect(useCodexStore.getState().tasks).toEqual([task])
-        await useCodexStore.getState().cancelTask({ taskId: task.taskId, attemptId: task.attemptId, leaseEpoch: task.leaseEpoch })
-        expect(api.cancelTask).toHaveBeenCalledWith({ taskId: 'task-1', attemptId: 'attempt-1', leaseEpoch: 1 })
+        await useCodexStore
+            .getState()
+            .cancelTask({
+                taskId: task.taskId,
+                attemptId: task.attemptId,
+                leaseEpoch: task.leaseEpoch
+            })
+        expect(api.cancelTask).toHaveBeenCalledWith({
+            taskId: 'task-1',
+            attemptId: 'attempt-1',
+            leaseEpoch: 1
+        })
         expect(useCodexStore.getState().tasks).toEqual([task])
     })
 })

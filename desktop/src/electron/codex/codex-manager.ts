@@ -69,7 +69,11 @@ export class CodexManager {
     getState(): CodexDesktopState {
         const config = this.loadConfig()
         return {
-            worker: this.workerState(config),
+            worker: {
+                ...this.workerState(config),
+                workspaceRoot: config.workspaceRoot,
+                codexExecutable: config.codexExecutable
+            },
             registration: this.getMcpRegistration()
         }
     }
@@ -187,7 +191,9 @@ export class CodexManager {
         return config
     }
 
-    private workerState(config: CodexConfig): CodexWorkerStateSnapshot {
+    private workerState(
+        config: CodexConfig
+    ): Omit<CodexWorkerStateSnapshot, 'workspaceRoot' | 'codexExecutable'> {
         if (!config.enabled) {
             return {
                 state: 'disabled',
