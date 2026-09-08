@@ -26,10 +26,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"nvpair-shared/clustertrust"
 	"nvpair-shared/codexruntime"
 	"nvpair-shared/protectedfile"
 )
@@ -61,9 +63,29 @@ type managedWorkerConfig struct {
 	PolicyCeiling         string   `json:"policyCeiling"`
 	ToolLabels            []string `json:"toolLabels,omitempty"`
 	WorkspaceAlias        string   `json:"workspaceAlias"`
+	RemoteListen          string   `json:"remoteListen,omitempty"`
+	ClusterDir            string   `json:"clusterDir,omitempty"`
+	SupervisorAllowlist   []string `json:"supervisorAllowlist,omitempty"`
 }
 
 func (c managedWorkerConfig) Validate() error {
+	if c.RemoteListen != "" || c.ClusterDir != "" || c.SupervisorAllowlist != nil {
+		if c.RemoteListen == "" || !filepath.IsAbs(c.ClusterDir) || len(c.SupervisorAllowlist) == 0 {
+			return errors.New("remoteListen, absolute clusterDir, and nonempty supervisorAllowlist are required together")
+		}
+		if err := validateRemoteListen(c.RemoteListen); err != nil {
+			return fmt.Errorf("remoteListen: %w", err)
+		}
+		_, port, _ := net.SplitHostPort(c.RemoteListen)
+		if n, err := strconv.Atoi(port); err != nil || n < 0 || n > 65535 {
+			return errors.New("remoteListen port must be between 0 and 65535")
+		}
+		for _, principal := range c.SupervisorAllowlist {
+			if strings.TrimSpace(principal) == "" || principal != strings.TrimSpace(principal) {
+				return errors.New("supervisorAllowlist entries must be nonempty principals without surrounding whitespace")
+			}
+		}
+	}
 	if c.SchemaVersion != managedWorkerConfigSchemaVersion {
 		return fmt.Errorf("unsupported managed Worker config schema version %d", c.SchemaVersion)
 	}
@@ -129,15 +151,20 @@ func readManagedConfig(path string) (managedWorkerConfig, error) {
 }
 
 type managedWorkerController struct {
-	mu            sync.Mutex
-	config        managedWorkerConfig
-	worker        *workerHTTPServer
-	store         *TaskStore
-	httpServer    *http.Server
-	descriptor    codexruntime.RuntimeDescriptor
-	heartbeatStop chan struct{}
-	heartbeatDone chan struct{}
-	closed        bool
+	mu             sync.Mutex
+	config         managedWorkerConfig
+	worker         *workerHTTPServer
+	store          *TaskStore
+	httpServer     *http.Server
+	localListener  net.Listener
+	remoteServer   *http.Server
+	remoteListener net.Listener
+	stopRevocation context.CancelFunc
+	revocationDone chan struct{}
+	descriptor     codexruntime.RuntimeDescriptor
+	heartbeatStop  chan struct{}
+	heartbeatDone  chan struct{}
+	closed         bool
 }
 
 func runManagedControl(input io.Reader, output io.Writer) error {
@@ -237,6 +264,15 @@ func runManagedControl(input io.Reader, output io.Writer) error {
 			if err == nil && message.ConfigRevision <= controller.config.PolicyRevision {
 				err = fmt.Errorf("config revision %d is not newer than current revision %d", message.ConfigRevision, controller.config.PolicyRevision)
 			}
+			if err == nil && message.ConfigRevision != config.PolicyRevision {
+				err = errors.New("control config revision does not match Worker policy revision")
+			}
+			if err != nil {
+				if emitErr := emit(codexruntime.ControlEvent{SchemaVersion: codexruntime.ControlSchemaVersion, Kind: codexruntime.ControlEventError, RequestID: message.RequestID, Error: err.Error()}); emitErr != nil {
+					return emitErr
+				}
+				continue
+			}
 			if err == nil {
 				err = controller.Stop()
 			}
@@ -264,6 +300,28 @@ func runManagedControl(input io.Reader, output io.Writer) error {
 func startManagedWorker(config managedWorkerConfig) (*managedWorkerController, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
+	}
+	var mesh *clustertrust.Mesh
+	var remoteListener net.Listener
+	if config.RemoteListen != "" {
+		mesh = clustertrust.Open(config.ClusterDir)
+		if !mesh.Clustered() {
+			err := errors.New("remote Worker requires a paired PAIR cluster identity")
+			writeManagedUnavailableDescriptor(config, err)
+			return nil, err
+		}
+		var err error
+		remoteListener, err = net.Listen("tcp", config.RemoteListen)
+		if err != nil {
+			writeManagedUnavailableDescriptor(config, err)
+			return nil, fmt.Errorf("listen remote Worker: %w", err)
+		}
+		// Until startup succeeds, every failure releases the reserved remote port.
+		defer func() {
+			if remoteListener != nil {
+				_ = remoteListener.Close()
+			}
+		}()
 	}
 	codexBin, err := resolveCodexExecutable(config.CodexBin)
 	if err != nil {
@@ -324,13 +382,28 @@ func startManagedWorker(config managedWorkerConfig) (*managedWorkerController, e
 		_ = store.Close()
 		return nil, err
 	}
-	httpServer := &http.Server{Handler: worker}
+	var localHandler http.Handler = worker
+	if mesh != nil {
+		worker.mesh = mesh
+		worker.allowedPeers = make(map[string]bool, len(config.SupervisorAllowlist))
+		for _, principal := range config.SupervisorAllowlist {
+			worker.allowedPeers[principal] = true
+		}
+		localAuth := &workerHTTPServer{authToken: config.AuthToken}
+		localHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if localAuth.authorize(w, r) {
+				worker.serveAuthorized(w, r)
+			}
+		})
+	}
+	httpServer := &http.Server{Handler: localHandler}
 	tlsListener := tls.NewListener(listener, &tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS13})
 	controller := &managedWorkerController{
-		config:     config,
-		worker:     worker,
-		store:      store,
-		httpServer: httpServer,
+		config:        config,
+		worker:        worker,
+		store:         store,
+		httpServer:    httpServer,
+		localListener: listener,
 		descriptor: codexruntime.RuntimeDescriptor{
 			SchemaVersion:           codexruntime.RuntimeSchemaVersion,
 			InstallationID:          config.InstallationID,
@@ -355,6 +428,20 @@ func startManagedWorker(config managedWorkerConfig) (*managedWorkerController, e
 	}
 	controller.heartbeatStop = make(chan struct{})
 	controller.heartbeatDone = make(chan struct{})
+	if remoteListener != nil {
+		controller.remoteListener = remoteListener
+		controller.remoteServer = &http.Server{Handler: worker}
+		ctx, cancel := context.WithCancel(context.Background())
+		controller.stopRevocation = cancel
+		controller.revocationDone = make(chan struct{})
+		go func() {
+			defer close(controller.revocationDone)
+			worker.RevocationLoop(ctx)
+		}()
+		remoteTLS := tls.NewListener(remoteListener, mesh.ServerTLSConfig())
+		go func() { _ = controller.remoteServer.Serve(remoteTLS) }()
+		remoteListener = nil // Ownership transferred to the controller.
+	}
 	go controller.runHeartbeat()
 	go func() {
 		if err := httpServer.Serve(tlsListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -463,9 +550,30 @@ func (c *managedWorkerController) Stop() error {
 	if heartbeatDone != nil {
 		<-heartbeatDone
 	}
+	if c.stopRevocation != nil {
+		c.stopRevocation()
+		<-c.revocationDone
+	}
+	// Close ingress before cancelling tasks, including a listener whose Serve
+	// goroutine has not yet registered with http.Server.
+	if c.remoteListener != nil {
+		_ = c.remoteListener.Close()
+	}
+	if c.localListener != nil {
+		_ = c.localListener.Close()
+	}
 	worker.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	err := server.Shutdown(ctx)
+	if err != nil {
+		_ = server.Close()
+	}
+	if c.remoteServer != nil {
+		if remoteErr := c.remoteServer.Shutdown(ctx); remoteErr != nil {
+			_ = c.remoteServer.Close()
+			err = errors.Join(err, remoteErr)
+		}
+	}
 	cancel()
 	if closeErr := store.Close(); err == nil {
 		err = closeErr

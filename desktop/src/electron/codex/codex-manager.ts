@@ -24,7 +24,8 @@ import {
     codexRuntimeDescriptorPath,
     codexWorkerConfigPath,
     loadCodexConfig,
-    saveCodexConfig
+    saveCodexConfig,
+    validateCodexConfig
 } from './config-store'
 import {
     applyMcpRegistration,
@@ -34,6 +35,9 @@ import {
 } from './mcp-registration'
 
 interface ManagedWorkerConfig {
+    remoteListen?: string
+    clusterDir?: string
+    supervisorAllowlist?: string[]
     schemaVersion: 1
     installationId: string
     workerInstanceId: string
@@ -69,6 +73,7 @@ export class CodexManager {
     getState(): CodexDesktopState {
         const config = this.loadConfig()
         return {
+            network: config.network,
             worker: {
                 ...this.workerState(config),
                 workspaceRoot: config.workspaceRoot,
@@ -84,6 +89,7 @@ export class CodexManager {
         const stateRoot = config.stateRoot || path.join(this.userDataRoot, 'codex', 'worker-state')
         const next: CodexConfig = {
             ...config,
+            network: input.network ?? config.network,
             workspaceRoot: input.workspaceRoot,
             stateRoot,
             codexExecutable:
@@ -94,8 +100,7 @@ export class CodexManager {
             registrationName: CODEX_REGISTRATION_NAME,
             policyRevision: config.policyRevision + 1
         }
-        saveCodexConfig(this.configFile, next)
-        this.writeManagedWorkerConfig(next)
+        this.saveWorkerConfiguration(next)
         return this.getState()
     }
 
@@ -107,9 +112,8 @@ export class CodexManager {
                     'configure a workspace and Codex executable before enabling the Worker'
                 )
             }
-            this.writeManagedWorkerConfig(config)
         }
-        saveCodexConfig(this.configFile, {
+        this.saveWorkerConfiguration({
             ...config,
             enabled,
             registrationName: CODEX_REGISTRATION_NAME
@@ -117,20 +121,63 @@ export class CodexManager {
         return this.getState()
     }
 
+    private saveWorkerConfiguration(candidate: CodexConfig): void {
+        const next = validateCodexConfig({ ...candidate, network: { ...candidate.network } })
+        const workerFile = codexWorkerConfigPath(this.userDataRoot)
+        const previousConfig = readProtectedConfig(this.configFile)
+        const previousWorker = readProtectedConfig(workerFile)
+        try {
+            this.writeManagedWorkerConfig(next)
+            saveCodexConfig(this.configFile, next)
+        } catch (error) {
+            // A failed permissions/listener change must not appear as saved while
+            // the broker continues using the previous configuration.
+            const failures = [error]
+            for (const [file, content] of [
+                [workerFile, previousWorker],
+                [this.configFile, previousConfig]
+            ]) {
+                try {
+                    if (content === null) {
+                        if (file && fs.existsSync(file)) fs.unlinkSync(file)
+                    } else if (file && content !== undefined) writeProtectedConfig(file, content)
+                } catch (rollbackError) {
+                    failures.push(rollbackError)
+                }
+            }
+            if (failures.length > 1)
+                throw new AggregateError(
+                    failures,
+                    'Configuration save and rollback failed; check Worker settings before continuing'
+                )
+            throw error
+        }
+    }
+
     getMcpRegistration(): CodexRegistrationSnapshot {
         const configPath = this.mainConfigPath()
         try {
             const current = getMcpRegistration(configPath)
+            const expected = this.desiredRegistration()
+            const outdated =
+                current &&
+                (current.command !== expected.command ||
+                    JSON.stringify(current.args) !== JSON.stringify(expected.args))
             return {
-                state: current
-                    ? this.hasRunningSupervisor()
-                        ? 'connected'
-                        : 'waiting_for_main'
-                    : 'unregistered',
+                state: outdated
+                    ? 'failed'
+                    : current
+                      ? this.hasRunningSupervisor(expected.args.at(-1) ?? '')
+                          ? 'connected'
+                          : 'waiting_for_main'
+                      : 'unregistered',
                 path: configPath,
                 command: current?.command ?? null,
                 args: current?.args ?? [],
-                fingerprint: fingerprintFile(configPath)
+                fingerprint: fingerprintFile(configPath),
+                error: outdated
+                    ? 'Connection settings changed. Apply registration, then reload Main Codex.'
+                    : undefined
             }
         } catch (error) {
             return {
@@ -146,17 +193,7 @@ export class CodexManager {
 
     applyMcpRegistration(): CodexRegistrationSnapshot {
         const configPath = this.mainConfigPath()
-        const registration: CodexMcpRegistration = {
-            command: this.supervisorCommand,
-            args: [
-                '--runtime-descriptor',
-                codexRuntimeDescriptorPath(this.userDataRoot),
-                '--state-root',
-                path.join(this.userDataRoot, 'codex', 'supervisor-state'),
-                '--management-socket-dir',
-                path.join(this.userDataRoot, 'codex', 'management')
-            ]
-        }
+        const registration = this.desiredRegistration()
         const current = fingerprintFile(configPath)
         const applied = applyMcpRegistration(configPath, registration, current)
         return {
@@ -166,6 +203,35 @@ export class CodexManager {
             args: applied.args,
             fingerprint: applied.fingerprint
         }
+    }
+
+    private desiredRegistration(): CodexMcpRegistration {
+        const network = this.loadConfig().network
+        const registration = {
+            command: this.supervisorCommand,
+            args: [
+                '--runtime-descriptor',
+                codexRuntimeDescriptorPath(this.userDataRoot),
+                '--state-root',
+                path.join(this.userDataRoot, 'codex', 'supervisor-state'),
+                '--management-socket-dir',
+                path.join(this.userDataRoot, 'codex', 'management'),
+                ...(network.workerEndpoints.length
+                    ? [
+                          '--cluster-dir',
+                          network.clusterDir,
+                          '--worker-endpoints',
+                          network.workerEndpoints.join(',')
+                      ]
+                    : [])
+            ]
+        }
+        const configurationId = crypto
+            .createHash('sha256')
+            .update(JSON.stringify(registration))
+            .digest('hex')
+        registration.args.push('--configuration-id', configurationId)
+        return registration
     }
 
     removeMcpRegistration(): CodexRegistrationSnapshot {
@@ -290,6 +356,13 @@ export class CodexManager {
 
     private writeManagedWorkerConfig(config: CodexConfig): void {
         const workerConfig: ManagedWorkerConfig = {
+            ...(config.network.remoteListen
+                ? {
+                      remoteListen: config.network.remoteListen,
+                      clusterDir: config.network.clusterDir,
+                      supervisorAllowlist: config.network.supervisorAllowlist
+                  }
+                : {}),
             schemaVersion: 1,
             installationId: config.installationId,
             workerInstanceId: config.workerInstanceId,
@@ -318,7 +391,7 @@ export class CodexManager {
         return path.join(this.codexHome, 'config.toml')
     }
 
-    private hasRunningSupervisor(): boolean {
+    private hasRunningSupervisor(configurationId: string): boolean {
         const directory = path.join(this.userDataRoot, 'codex', 'management')
         if (!fs.existsSync(directory)) return false
         for (const name of fs.readdirSync(directory)) {
@@ -330,11 +403,13 @@ export class CodexManager {
                     schemaVersion?: unknown
                     pid?: unknown
                     socketPath?: unknown
+                    configurationId?: string
                 }
                 if (
                     registry.schemaVersion !== 1 ||
                     typeof registry.pid !== 'number' ||
-                    typeof registry.socketPath !== 'string'
+                    typeof registry.socketPath !== 'string' ||
+                    registry.configurationId !== configurationId
                 )
                     continue
                 process.kill(registry.pid, 0)

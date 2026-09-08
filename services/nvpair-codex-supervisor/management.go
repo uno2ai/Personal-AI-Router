@@ -31,10 +31,11 @@ type managementRequest struct {
 }
 
 type managementRegistry struct {
-	SchemaVersion int    `json:"schemaVersion"`
-	PID           int    `json:"pid"`
-	SocketPath    string `json:"socketPath"`
-	WrittenAt     string `json:"writtenAt"`
+	ConfigurationID string `json:"configurationId,omitempty"`
+	SchemaVersion   int    `json:"schemaVersion"`
+	PID             int    `json:"pid"`
+	SocketPath      string `json:"socketPath"`
+	WrittenAt       string `json:"writtenAt"`
 }
 
 func ManagementSocketPath(directory string, pid int) string {
@@ -46,10 +47,10 @@ func ManagementSocketPath(directory string, pid int) string {
 		return short
 	}
 	digest := sha256.Sum256([]byte(directory))
-	return filepath.Join(os.TempDir(), "nvpair-codex-"+hex.EncodeToString(digest[:])[:12]+fmt.Sprintf("-%d.sock", pid))
+	return filepath.Join(os.TempDir(), "nvp-"+hex.EncodeToString(digest[:])[:12], fmt.Sprintf("%d.sock", pid))
 }
 
-func WriteManagementRegistry(directory, socketPath string, pid int) (func(), error) {
+func WriteManagementRegistry(directory, socketPath string, pid int, configurationID string) (func(), error) {
 	if strings.TrimSpace(directory) == "" || !filepath.IsAbs(directory) {
 		return nil, errors.New("management registry directory must be absolute")
 	}
@@ -57,7 +58,7 @@ func WriteManagementRegistry(directory, socketPath string, pid int) (func(), err
 		return nil, fmt.Errorf("create management registry directory: %w", err)
 	}
 	path := filepath.Join(directory, fmt.Sprintf("supervisor-%d.json", pid))
-	data, err := json.Marshal(managementRegistry{SchemaVersion: 1, PID: pid, SocketPath: socketPath, WrittenAt: time.Now().UTC().Format(time.RFC3339Nano)})
+	data, err := json.Marshal(managementRegistry{ConfigurationID: configurationID, SchemaVersion: 1, PID: pid, SocketPath: socketPath, WrittenAt: time.Now().UTC().Format(time.RFC3339Nano)})
 	if err != nil {
 		return nil, err
 	}
@@ -72,7 +73,15 @@ func (s *MCPServer) StartManagementSocket(ctx context.Context, path string) erro
 		return errors.New("management socket path must be absolute")
 	}
 	if runtime.GOOS != "windows" {
-		if err := protectedfile.EnsureDir(filepath.Dir(path)); err != nil {
+		directory := filepath.Dir(path)
+		// EnsureDir protects its target with chmod. Never apply it to the OS
+		// temp root, including an alternate spelling through a symlink.
+		if parent, err := os.Stat(directory); err == nil {
+			if temp, err := os.Stat(os.TempDir()); err == nil && os.SameFile(parent, temp) {
+				return errors.New("management socket requires a private subdirectory, not the OS temp root")
+			}
+		}
+		if err := protectedfile.EnsureDir(directory); err != nil {
 			return fmt.Errorf("create management socket directory: %w", err)
 		}
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {

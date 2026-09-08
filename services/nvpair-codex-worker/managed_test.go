@@ -99,7 +99,7 @@ func TestManagedControlStartsReportsAndStopsWorker(t *testing.T) {
 	if err := os.MkdirAll(workspace, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	config := validManagedConfig(root)
+	config, _, _ := managedRemoteFixture(t)
 	config.WorkspaceRoot = workspace
 	config.CodexBin = mustExecutable(t)
 	configPath := filepath.Join(root, "config.json")
@@ -159,6 +159,40 @@ func TestManagedControlStartsReportsAndStopsWorker(t *testing.T) {
 	}
 
 	previousBootEpoch := ready.Descriptor.BootEpoch
+	// Invalid replacement must retain the running controller so shutdown can
+	// still close both listeners and its watchers.
+	invalid := config
+	invalid.ClusterDir = ""
+	invalid.PolicyRevision = 2
+	invalidData, err := json.Marshal(invalid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := protectedfile.WriteFile(configPath, invalidData); err != nil {
+		t.Fatal(err)
+	}
+	invalidRevision, err := codexruntime.MarshalControlMessage(codexruntime.ControlMessage{
+		SchemaVersion:  codexruntime.ControlSchemaVersion,
+		Kind:           codexruntime.ControlKindConfigRevision,
+		RequestID:      "invalid-revision",
+		ConfigRevision: 2,
+		ConfigPath:     configPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inputWriter.Write(invalidRevision); err != nil {
+		t.Fatal(err)
+	}
+	if event := readManagedEvent(t, output); event.Kind != codexruntime.ControlEventError {
+		t.Fatalf("invalid revision event: %+v", event)
+	}
+	if _, err := inputWriter.Write(statusData); err != nil {
+		t.Fatal(err)
+	}
+	if event := readManagedEvent(t, output); event.State != codexruntime.RuntimeStateReady {
+		t.Fatalf("invalid revision orphaned controller: %+v", event)
+	}
 	config.PolicyRevision = 2
 	data, err = json.Marshal(config)
 	if err != nil {

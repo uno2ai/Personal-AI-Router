@@ -42,6 +42,10 @@ export default function CodexSettings() {
     const [workspaceDraft, setWorkspaceRoot] = useState<string | null>(null)
     const [executableDraft, setCodexExecutable] = useState<string | null>(null)
     const [policyDraft, setPolicyCeiling] = useState<CodexPolicyCeiling | null>(null)
+    const [clusterDraft, setClusterDir] = useState<string | null>(null)
+    const [listenDraft, setRemoteListen] = useState<string | null>(null)
+    const [allowlistDraft, setAllowlist] = useState<string | null>(null)
+    const [endpointsDraft, setEndpoints] = useState<string | null>(null)
 
     useEffect(() => {
         void refresh()
@@ -54,6 +58,15 @@ export default function CodexSettings() {
     const workspaceRoot = workspaceDraft ?? worker?.workspaceRoot ?? ''
     const codexExecutable = executableDraft ?? worker?.codexExecutable ?? ''
     const policyCeiling = policyDraft ?? worker?.policyCeiling ?? 'read-only'
+    const clusterDir = clusterDraft ?? state?.network.clusterDir ?? ''
+    const remoteListen = listenDraft ?? state?.network.remoteListen ?? ''
+    const allowlist = allowlistDraft ?? state?.network.supervisorAllowlist.join('\n') ?? ''
+    const endpoints = endpointsDraft ?? state?.network.workerEndpoints.join('\n') ?? ''
+    const lines = (value: string) =>
+        value
+            .split('\n')
+            .map(line => line.trim())
+            .filter(Boolean)
 
     return (
         <Stack gap="6" className="relative py-8 px-3 w-full">
@@ -106,13 +119,62 @@ export default function CodexSettings() {
                             className="bg-transparent border border-white/20 rounded px-2 py-1"
                             value={policyCeiling}
                             onChange={event =>
-                                setPolicyCeiling(event.target.value as CodexPolicyCeiling)
+                                setPolicyCeiling(
+                                    event.target.value === 'workspace-write'
+                                        ? 'workspace-write'
+                                        : 'read-only'
+                                )
                             }
                         >
                             <option value="read-only">Read-only</option>
                             <option value="workspace-write">Workspace write</option>
                         </select>
                     </label>
+                    <Text kind="body/semibold/md">Paired remote connections</Text>
+                    <Text kind="body/regular/sm">
+                        Pair the computers with Add node first. For different locations, use their
+                        Tailscale addresses. Remote access uses the same workspace and policy above.
+                    </Text>
+                    <label className="flex flex-col gap-1 text-sm">
+                        PAIR cluster directory
+                        <input
+                            className="bg-transparent border border-white/20 rounded px-2 py-1"
+                            value={clusterDir}
+                            onChange={event => setClusterDir(event.target.value)}
+                            placeholder="Absolute path to the existing PAIR cluster directory"
+                        />
+                    </label>
+                    <label className="flex flex-col gap-1 text-sm">
+                        Accept remote work at (IP:port; empty disables remote access)
+                        <input
+                            className="bg-transparent border border-white/20 rounded px-2 py-1"
+                            value={remoteListen}
+                            onChange={event => setRemoteListen(event.target.value)}
+                            placeholder="100.x.x.x:14324"
+                        />
+                    </label>
+                    <label className="flex flex-col gap-1 text-sm">
+                        Allowed paired Supervisor IDs (one per line)
+                        <textarea
+                            className="bg-transparent border border-white/20 rounded px-2 py-1"
+                            value={allowlist}
+                            onChange={event => setAllowlist(event.target.value)}
+                            rows={2}
+                        />
+                    </label>
+                    <label className="flex flex-col gap-1 text-sm">
+                        Remote Workers to use (one peer-ID=https://IP:port per line)
+                        <textarea
+                            className="bg-transparent border border-white/20 rounded px-2 py-1"
+                            value={endpoints}
+                            onChange={event => setEndpoints(event.target.value)}
+                            rows={2}
+                        />
+                    </label>
+                    <Text kind="body/regular/sm">
+                        Save settings, then Apply registration and reload Main Codex to use changed
+                        remote Worker addresses. Leaving this page discards unsaved edits.
+                    </Text>
                     <Flex gap="2" wrap="wrap">
                         <Button
                             kind="secondary"
@@ -122,7 +184,13 @@ export default function CodexSettings() {
                                 void configureWorker({
                                     workspaceRoot,
                                     codexExecutable: codexExecutable || undefined,
-                                    policyCeiling
+                                    policyCeiling,
+                                    network: {
+                                        clusterDir,
+                                        remoteListen,
+                                        supervisorAllowlist: lines(allowlist),
+                                        workerEndpoints: lines(endpoints)
+                                    }
                                 })
                             }
                         >
@@ -185,6 +253,9 @@ export default function CodexSettings() {
                     </Flex>
                     {registration?.path && (
                         <Text kind="body/regular/xs">Config: {registration.path}</Text>
+                    )}
+                    {registration?.error && (
+                        <Text kind="body/regular/sm">{registration.error}</Text>
                     )}
                 </Stack>
             </div>

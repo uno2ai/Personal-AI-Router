@@ -78,6 +78,22 @@ Worker refreshes the pin set before every request and polls it every two
 seconds to cancel active tasks after revocation or same-principal certificate
 rotation; the normal controlled integration bound is five seconds.
 
+Managed mode (`--managed-control`) optionally accepts `remoteListen` (an IP
+address or wildcard plus a numeric port), `clusterDir` (an absolute path), and
+`supervisorAllowlist` (a nonempty JSON array of certificate principals) in its
+protected JSON configuration. Supply all three together or omit all three.
+Startup requires an admitted PAIR identity and a successful remote bind; failure
+does not start a partially available Worker. Port `0` is accepted for ephemeral
+listeners; configure a fixed port for remote Supervisor registration.
+
+This adds a second listener using the standalone mTLS authorization and
+revocation rules. The pinned loopback TLS endpoint, bearer credential, and local
+runtime descriptor keep their existing format. Both listeners execute through
+one Worker, sharing its journal, artifact store, active tasks, concurrency limit,
+tool labels, workspace policy, and policy ceiling. Managed shutdown and config
+replacement stop both listeners and wait for the revocation and descriptor
+watchers. Remote endpoint registration belongs to the managing application.
+
 ## Protocol
 
 The Phase 1 routes are:

@@ -3,6 +3,13 @@
 
 export type CodexPolicyCeiling = 'read-only' | 'workspace-write'
 
+export interface CodexNetworkConfig {
+    clusterDir: string
+    remoteListen: string
+    supervisorAllowlist: string[]
+    workerEndpoints: string[]
+}
+
 export type CodexWorkerState =
     | 'disabled'
     | 'setup_required'
@@ -22,6 +29,7 @@ export type CodexRegistrationState =
     | 'failed'
 
 export interface CodexConfig {
+    network: CodexNetworkConfig
     schemaVersion: 1
     enabled: boolean
     workspaceRoot: string
@@ -58,11 +66,13 @@ export interface CodexRegistrationSnapshot {
 }
 
 export interface CodexDesktopState {
+    network: CodexNetworkConfig
     worker: CodexWorkerStateSnapshot
     registration: CodexRegistrationSnapshot
 }
 
 export interface CodexWorkerConfigInput {
+    network?: CodexNetworkConfig
     workspaceRoot: string
     codexExecutable?: string
     policyCeiling?: CodexPolicyCeiling

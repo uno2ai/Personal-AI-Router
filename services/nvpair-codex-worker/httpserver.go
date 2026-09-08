@@ -136,6 +136,10 @@ func (s *workerHTTPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !s.authorize(w, r) {
 		return
 	}
+	s.serveAuthorized(w, r)
+}
+
+func (s *workerHTTPServer) serveAuthorized(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/worker":
 		s.handleWorker(w)

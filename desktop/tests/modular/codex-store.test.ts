@@ -7,6 +7,7 @@ import { useCodexStore } from '@/ui/stores/codex.store'
 import type { CodexDesktopState, CodexTaskMetadata } from '@/shared/types/codex'
 
 const disabledState: CodexDesktopState = {
+    network: { clusterDir: '', remoteListen: '', supervisorAllowlist: [], workerEndpoints: [] },
     worker: {
         workspaceRoot: '',
         codexExecutable: '',
@@ -104,13 +105,11 @@ describe('Codex renderer store', () => {
         const api = installApi()
         await useCodexStore.getState().refreshTasks()
         expect(useCodexStore.getState().tasks).toEqual([task])
-        await useCodexStore
-            .getState()
-            .cancelTask({
-                taskId: task.taskId,
-                attemptId: task.attemptId,
-                leaseEpoch: task.leaseEpoch
-            })
+        await useCodexStore.getState().cancelTask({
+            taskId: task.taskId,
+            attemptId: task.attemptId,
+            leaseEpoch: task.leaseEpoch
+        })
         expect(api.cancelTask).toHaveBeenCalledWith({
             taskId: 'task-1',
             attemptId: 'attempt-1',

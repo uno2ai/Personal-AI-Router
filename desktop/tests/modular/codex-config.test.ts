@@ -14,6 +14,7 @@ import {
 } from '@/electron/codex/mcp-registration'
 import { defaultCodexConfig, loadCodexConfig, saveCodexConfig } from '@/electron/codex/config-store'
 import { writeProtectedConfig } from '@/electron/codex/protected-config'
+import * as protectedConfig from '@/electron/codex/protected-config'
 import { runProtectedFile } from '@/electron/protected-file'
 import { CodexManager, resolveEffectiveCodexHome } from '@/electron/codex/codex-manager'
 
@@ -202,6 +203,181 @@ describe('Codex configuration', () => {
 })
 
 describe('Codex config defaults', () => {
+    it('keeps both saved files unchanged when remote settings cannot be written', () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pair-rollback-'))
+        try {
+            const manager = new CodexManager(root, '/pair/supervisor', path.join(root, 'main'))
+            const network = {
+                clusterDir: root,
+                remoteListen: '100.64.0.1:14324',
+                supervisorAllowlist: ['peer'],
+                workerEndpoints: []
+            }
+            manager.configureWorker({ workspaceRoot: root, network })
+            const workerFile = path.join(root, 'codex', 'worker-config.json')
+            const previous = fs.readFileSync(workerFile, 'utf8')
+            const spy = vi
+                .spyOn(protectedConfig, 'writeProtectedConfig')
+                .mockImplementationOnce(() => {
+                    throw new Error('injected write failure')
+                })
+            try {
+                expect(() =>
+                    manager.configureWorker({
+                        workspaceRoot: root,
+                        network: defaultCodexConfig().network
+                    })
+                ).toThrow('injected write failure')
+            } finally {
+                spy.mockRestore()
+            }
+            expect(manager.getState().network).toEqual(network)
+            expect(fs.readFileSync(workerFile, 'utf8')).toBe(previous)
+            const actualWrite = protectedConfig.writeProtectedConfig
+            let injected = false
+            const lateFailure = vi
+                .spyOn(protectedConfig, 'writeProtectedConfig')
+                .mockImplementation((file, content) => {
+                    if (file === path.join(root, 'codex', 'config.json') && !injected) {
+                        injected = true
+                        throw new Error('injected late write failure')
+                    }
+                    actualWrite(file, content)
+                })
+            try {
+                expect(() =>
+                    manager.configureWorker({
+                        workspaceRoot: root,
+                        network: defaultCodexConfig().network
+                    })
+                ).toThrow('injected late write failure')
+            } finally {
+                lateFailure.mockRestore()
+            }
+            expect(injected).toBe(true)
+            expect(manager.getState().network).toEqual(network)
+            expect(fs.readFileSync(workerFile, 'utf8')).toBe(previous)
+        } finally {
+            fs.rmSync(root, { recursive: true, force: true })
+        }
+    })
+
+    it('normalizes HTTPS port 443 and rejects port zero', () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pair-ports-'))
+        try {
+            const file = path.join(root, 'config.json')
+            const config = defaultCodexConfig()
+            config.network = {
+                ...config.network,
+                clusterDir: root,
+                workerEndpoints: ['peer=https://100.64.0.2:443']
+            }
+            saveCodexConfig(file, config)
+            expect(loadCodexConfig(file).network.workerEndpoints).toEqual([
+                'peer=https://100.64.0.2'
+            ])
+            config.network.workerEndpoints = ['peer=https://100.64.0.2:0']
+            expect(() => saveCodexConfig(file, config)).toThrow()
+        } finally {
+            fs.rmSync(root, { recursive: true, force: true })
+        }
+    })
+    it('restores remote settings and wires both managed Worker and MCP registration', () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pair-remote-config-'))
+        try {
+            const manager = new CodexManager(root, '/pair/supervisor', path.join(root, 'main'))
+            const network = {
+                clusterDir: path.join(root, 'cluster'),
+                remoteListen: '100.64.0.1:14324',
+                supervisorAllowlist: ['peer-main'],
+                workerEndpoints: ['peer-worker=https://100.64.0.2:14324']
+            }
+            manager.configureWorker({ workspaceRoot: root, network })
+            const reopened = new CodexManager(root, '/pair/supervisor', path.join(root, 'main'))
+            expect(reopened.getState().network).toEqual(network)
+            const managed = JSON.parse(
+                fs.readFileSync(path.join(root, 'codex', 'worker-config.json'), 'utf8')
+            )
+            expect(managed).toMatchObject({
+                remoteListen: network.remoteListen,
+                clusterDir: network.clusterDir,
+                supervisorAllowlist: network.supervisorAllowlist,
+                policyCeiling: 'read-only'
+            })
+            expect(reopened.applyMcpRegistration().args).toEqual(
+                expect.arrayContaining([
+                    '--runtime-descriptor',
+                    '--cluster-dir',
+                    network.clusterDir,
+                    '--worker-endpoints',
+                    network.workerEndpoints[0]
+                ])
+            )
+            reopened.configureWorker({
+                workspaceRoot: root,
+                network: { ...network, workerEndpoints: [] }
+            })
+            expect(reopened.getMcpRegistration()).toMatchObject({
+                state: 'failed',
+                error: expect.stringContaining('Apply registration')
+            })
+            expect(reopened.applyMcpRegistration().args).not.toContain('--worker-endpoints')
+        } finally {
+            fs.rmSync(root, { recursive: true, force: true })
+        }
+    })
+
+    it('migrates previous schema-1 files to disabled remote access', () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pair-old-network-'))
+        try {
+            const { network: _network, ...oldConfig } = defaultCodexConfig()
+            const file = path.join(root, 'config.json')
+            writeProtectedConfig(file, JSON.stringify(oldConfig))
+            expect(loadCodexConfig(file).network).toEqual(defaultCodexConfig().network)
+        } finally {
+            fs.rmSync(root, { recursive: true, force: true })
+        }
+    })
+
+    it('rejects unsafe remote settings before replacing saved configuration', () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pair-network-invalid-'))
+        const file = path.join(root, 'config.json')
+        const base = defaultCodexConfig()
+        try {
+            saveCodexConfig(file, base)
+            for (const workerEndpoints of [
+                ['peer=http://100.64.0.2:14324'],
+                ['peer=https://user:secret@100.64.0.2:14324'],
+                ['peer=https://100.64.0.2:14324/path'],
+                ['local=https://100.64.0.2:14324'],
+                ['peer=https://100.64.0.2:14324', 'peer=https://100.64.0.3:14324']
+            ]) {
+                expect(() =>
+                    saveCodexConfig(file, {
+                        ...base,
+                        network: {
+                            ...base.network,
+                            clusterDir: root,
+                            workerEndpoints
+                        }
+                    })
+                ).toThrow()
+            }
+            expect(() =>
+                saveCodexConfig(file, {
+                    ...base,
+                    network: {
+                        ...base.network,
+                        clusterDir: root,
+                        remoteListen: '100.64.0.1:14324'
+                    }
+                })
+            ).toThrow(/allowed Supervisor/)
+            expect(loadCodexConfig(file)).toEqual(base)
+        } finally {
+            fs.rmSync(root, { recursive: true, force: true })
+        }
+    })
     it('has a stable versioned default shape', () => {
         expect(defaultCodexConfig()).toMatchObject({
             schemaVersion: 1,
@@ -254,9 +430,21 @@ describe('Codex config defaults', () => {
             JSON.stringify({
                 schemaVersion: 1,
                 pid: process.pid,
+                configurationId: applied.args.at(-1),
                 socketPath: path.join(management, 'supervisor.sock')
             })
         )
         expect(manager.getMcpRegistration().state).toBe('connected')
+        manager.configureWorker({
+            workspaceRoot: root,
+            network: {
+                clusterDir: root,
+                remoteListen: '',
+                supervisorAllowlist: [],
+                workerEndpoints: ['peer=https://100.64.0.2:14324']
+            }
+        })
+        manager.applyMcpRegistration()
+        expect(manager.getMcpRegistration().state).toBe('waiting_for_main')
     })
 })

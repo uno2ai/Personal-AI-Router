@@ -29,6 +29,7 @@ func main() {
 	runtimeDescriptor := flag.String("runtime-descriptor", "", "broker-owned local Worker runtime descriptor")
 	stateRoot := flag.String("state-root", "", "durable Supervisor state directory")
 	managementSocketDir := flag.String("management-socket-dir", "", "private same-user Supervisor management registry directory")
+	configurationID := flag.String("configuration-id", "", "Desktop registration revision echoed in the management registry")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 	if *showVersion {
@@ -65,7 +66,7 @@ func main() {
 	}
 	if *managementSocketDir != "" {
 		socketPath := ManagementSocketPath(*managementSocketDir, os.Getpid())
-		removeRegistry, err := WriteManagementRegistry(*managementSocketDir, socketPath, os.Getpid())
+		removeRegistry, err := WriteManagementRegistry(*managementSocketDir, socketPath, os.Getpid(), *configurationID)
 		if err != nil {
 			log.Fatal(err)
 		}
