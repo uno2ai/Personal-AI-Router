@@ -8,7 +8,10 @@ SPDX-License-Identifier: Apache-2.0
 This repair branch starts at `codex/windows-validation-5fd4f72` (`538cdfe`),
 which records the first Windows validation of upstream `5fd4f72`.
 The original validation evidence remains in [windows-5fd4f72](../windows-5fd4f72/README.md).
-This branch has not been merged into main; native macOS regression testing and final review remain with the maintainer.
+The maintainer subsequently authorized integration: main was fast-forwarded to
+`cc9d31b` on 2026-09-08. The [subsequent Windows GUI acceptance](windows-gui-cc9d31b.md)
+covers the previously pending Codex GUI/lifecycle checklist. Native macOS
+regression testing remains with the maintainer.
 
 ## Environment
 
@@ -122,9 +125,10 @@ module logs. Windows arm64 and native macOS were not executed.
 
 The Electron restart/ownership E2E is macOS-only. Windows installation and the
 GUI checklist (settings visibility, ready state, Main MCP registration,
-`workers.list`, shutdown ownership and recovery after app restart) still require
-manual confirmation. Go cross-process ownership/restart coverage does not
-establish that the Windows GUI checklist passed.
+`workers.list`, shutdown ownership and recovery after app restart) were outside
+this original automated run. The [subsequent GUI report](windows-gui-cc9d31b.md)
+records the separate Windows GUI verification and its test-profile limitations.
+The NSIS installation wizard remains untested.
 
 ## Review and decisions
 
