@@ -57,3 +57,53 @@ Windows Worker, established:
 These results establish the remote service path; they do not themselves prove
 the new Desktop-managed remote listener on both operating systems. Additional
 Desktop acceptance is recorded separately below when executed.
+
+## Desktop candidate acceptance, 2026-09-08
+
+Candidate implementation: `bd3cd7d` on `codex/desktop-remote-integration`.
+This is not a declaration that both platforms are fully accepted.
+
+- Mac packaged GUI saved incoming/outgoing remote settings, applied MCP
+  registration to an isolated Main profile, and started its managed Worker.
+  The GUI reported Ready; OS inspection confirmed that this same managed
+  Worker listened on the selected Tailscale address at port 14324. Incoming
+  access was explicitly enabled by the user for the paired Windows principal
+  only, with a temporary Git workspace and a read-only policy ceiling.
+- Desktop unit suite: 45 files, 245 tests passed using
+  `GOFLAGS=-buildvcs=false npm run test:unit`. Without that environment flag,
+  the local parent SVN checkout conflicts with the nested Git checkout during
+  the test broker's Go build; that run failed before 17 tests executed.
+- Worker and Supervisor `GOFLAGS=-buildvcs=false go test -race ./...` passed
+  on Mac. Windows cross-compilation is not native Windows execution.
+- Mac arm64 package build passed. Signing/notarization are outside the
+  personal-use acceptance scope.
+
+### Remaining gates and observed limitations
+
+1. Main Codex launched from the saved isolated MCP configuration could not
+   invoke `workers.list`: it reported that the MCP call required approval,
+   while its approval policy was `never`. The CLI exited zero, but the
+   requested end-to-end task did **not** pass. Validate in a Main session
+   where the user can approve the tool; do not disable safeguards to turn
+   this failure into a pass.
+2. Direct remote dispatch of the candidate clone/native Go tests to Windows
+   reached `blocked` / `approval_required` (task
+   `task-27e0128d847071fecc951644`). No native test success is inferred from
+   that result. Candidate Windows GUI lifecycle/remote-listener acceptance
+   also remains unverified; the old standalone Worker is not that candidate.
+3. After the isolated Main process exited, Desktop correctly showed Waiting
+   for Main, but its task-metadata error still displayed a stale management
+   socket `ECONNREFUSED`. This is an observed diagnostic/UI limitation, not
+   evidence that the managed Worker stopped.
+4. Windows-to-Mac verification was dispatched directly through the remote
+   Worker (task `task-3262a863866336a14b4fe6e9`). Its returned handoff was
+   blocked: the nested Windows Supervisor exited 1 with `open task index:
+   Access is denied` in its workspace state-root, before initialization.
+   A validation harness was created, but no reverse delegation occurred.
+   This result does not establish the exact underlying Windows permission
+   cause; repeat from the Windows local Codex context with its normal user
+   approval flow, not by weakening the remote sandbox.
+
+The test Mac profile remains isolated from the user's normal Main Codex
+configuration. Remote reception can be stopped with Disable worker, or by
+clearing both incoming address and allowlist and saving the settings.
