@@ -65,6 +65,15 @@ Choose from:
 - **macOS disk image:** Open the `.dmg` and drag NVIDIA Personal AI Router to
   **Applications**, then launch it from there.
 
+On macOS, the firewall helper is **optional**. Choose **Skip** in its setup
+dialog to continue without installing it or changing firewall rules. The choice
+is remembered across launches. You can retry from **Settings → Optional macOS
+firewall helper → Configure**. Helper setup requires an NVIDIA-signed build and
+macOS administrator approval; unsigned personal builds should skip it. If your
+paired devices already connect (for example, through Tailscale), Codex Pair does
+not require this helper. Skipping does not disable the firewall or remove an
+already installed helper.
+
 The releases page also carries an archive of the background services and the
 terminal interface for each platform. It contains no desktop application, so it
 is the headless option rather than another way to install this one. Refer to

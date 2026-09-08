@@ -17,12 +17,15 @@ interface UiConfig {
     modularLogLevel: ModularLogLevel
     /** macOS only: the one-time privileged-helper setup (register the SMAppService daemon + configure the Application Firewall) has completed. Gates the first-run admin prompt; left false until the daemon is enabled and firewall configuration succeeds, so an approval-pending launch retries next time. */
     macHelperSetupComplete: boolean
+    /** User declined optional setup; do not prompt or install on startup. */
+    macHelperSetupSkipped: boolean
 }
 
 const DEFAULTS: UiConfig = {
     firstRun: true,
     modularLogLevel: MODULAR_DEFAULT_LOG_LEVEL,
-    macHelperSetupComplete: false
+    macHelperSetupComplete: false,
+    macHelperSetupSkipped: false
 }
 
 let config: UiConfig = { ...DEFAULTS }
@@ -77,7 +80,7 @@ export function loadUiConfig(): void {
     }
 }
 
-function save(): void {
+function save(strict = false): void {
     try {
         const filePath = getFilePath()
         const dir = path.dirname(filePath)
@@ -85,7 +88,8 @@ function save(): void {
         const tmp = filePath + '.tmp'
         fs.writeFileSync(tmp, JSON.stringify(config, null, 2), 'utf8')
         fs.renameSync(tmp, filePath)
-    } catch {
+    } catch (error) {
+        if (strict) throw error
         /* best-effort */
     }
 }
@@ -119,5 +123,14 @@ export function isMacHelperSetupComplete(): boolean {
 
 export function setMacHelperSetupComplete(value: boolean): void {
     config.macHelperSetupComplete = value
-    save()
+    save(true)
+}
+
+export function isMacHelperSetupSkipped(): boolean {
+    return config.macHelperSetupSkipped === true
+}
+
+export function setMacHelperSetupSkipped(value: boolean): void {
+    config.macHelperSetupSkipped = value
+    save(true)
 }

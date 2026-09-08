@@ -22,6 +22,7 @@ import {
     readCliBinManifest
 } from '@/electron/service-bridge/modular-supervisor'
 import { modularShippedBinaryBaseNames } from '@/shared/constants/modular-binaries'
+import { getMacHelperSetupStatus, runMacHelperSetup } from '@/electron/services/mac-helper-setup'
 
 const LICENSE_FILE = 'LICENSE'
 const THIRD_PARTY_LICENSE_FILE = 'THIRD_PARTY_NOTICES.md'
@@ -45,6 +46,13 @@ async function openShippedFile(name: string): Promise<void> {
 }
 
 export function registerServiceIpc(): void {
+    safeHandle('service:get-mac-helper-status', () => getMacHelperSetupStatus())
+
+    safeHandle('service:setup-mac-helper', async () => {
+        await runMacHelperSetup(true)
+        return getMacHelperSetupStatus()
+    })
+
     safeHandle('service:get-status', async (): Promise<ServiceStatus> => {
         const status: ServiceStatus = {
             connectorStatus: getConnectorStatus(),

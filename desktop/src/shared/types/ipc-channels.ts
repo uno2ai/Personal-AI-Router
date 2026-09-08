@@ -46,6 +46,12 @@ export interface ServiceStatus {
     error?: string
 }
 
+export interface MacHelperSetupStatus {
+    supported: boolean
+    complete: boolean
+    skipped: boolean
+}
+
 /**
  * Application + bundled backend service binary versions, sourced from
  * `app.getVersion()` and the shipped `cli-bin/manifest.json` (stamped at build
@@ -91,6 +97,8 @@ export interface IpcChannelMap {
 
     // -- Service lifecycle (controls the CLI child process) --
     'service:get-status': { request: void; response: ServiceStatus }
+    'service:get-mac-helper-status': { request: void; response: MacHelperSetupStatus }
+    'service:setup-mac-helper': { request: void; response: MacHelperSetupStatus }
     'service:stop': { request: void; response: void }
     'service:start': { request: void; response: void }
     'service:restart': { request: void; response: void }

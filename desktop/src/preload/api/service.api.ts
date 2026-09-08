@@ -3,11 +3,17 @@
 
 import { ipcRenderer } from 'electron'
 import { invokeAndUnwrap } from '@/preload/api/unwrap'
-import type { ServiceStatus, ServiceVersions } from '@/shared/types/ipc-channels'
+import type {
+    MacHelperSetupStatus,
+    ServiceStatus,
+    ServiceVersions
+} from '@/shared/types/ipc-channels'
 import type { ModularLogLevel } from '@/shared/constants/modular-runtime'
 
 export interface IServiceApi {
     getStatus(): Promise<ServiceStatus>
+    getMacHelperStatus(): Promise<MacHelperSetupStatus>
+    setupMacHelper(): Promise<MacHelperSetupStatus>
     getVersions(): Promise<ServiceVersions>
     stop(): Promise<void>
     start(): Promise<void>
@@ -23,6 +29,10 @@ export interface IServiceApi {
 
 export const serviceApi: IServiceApi = {
     getStatus: () => invokeAndUnwrap<ServiceStatus>(ipcRenderer.invoke('service:get-status')),
+    getMacHelperStatus: () =>
+        invokeAndUnwrap<MacHelperSetupStatus>(ipcRenderer.invoke('service:get-mac-helper-status')),
+    setupMacHelper: () =>
+        invokeAndUnwrap<MacHelperSetupStatus>(ipcRenderer.invoke('service:setup-mac-helper')),
     getVersions: () => invokeAndUnwrap<ServiceVersions>(ipcRenderer.invoke('service:get-versions')),
     stop: () => invokeAndUnwrap<void>(ipcRenderer.invoke('service:stop')),
     start: () => invokeAndUnwrap<void>(ipcRenderer.invoke('service:start')),
